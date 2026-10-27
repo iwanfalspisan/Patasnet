@@ -6,7 +6,11 @@ import {
   saveGoogleSheetsDatabase,
   syncSheetsWebhook,
 } from '../lib/serverSheets.ts';
-import { normalizeGoogleDriveImageUrl, sanitizeSheetSettings } from '../lib/googleSheetsIntegration.ts';
+import {
+  normalizeGoogleDriveImageUrl,
+  sanitizeSheetSettings,
+  EMBEDDED_DRIVE_LOGO_URL,
+} from '../lib/googleSheetsIntegration.ts';
 
 // ---------------------- PACKAGES & COVERAGE STORE (PERSISTED TO DISK & SHEETS) ----------------------
 
@@ -551,13 +555,13 @@ function loadExtraCompanySettings() {
     console.warn('Error reading extra company settings:', e);
   }
   return {
-    name: 'Patas Net WiFi',
+    name: 'Patas.Net',
     address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
     logoText: 'PATAS NET',
     themeColor: '#2563eb',
-    logoUrl: '',
+    logoUrl: EMBEDDED_DRIVE_LOGO_URL,
     promos: [] as string[],
-    legalName: 'PT. AMANUSA TELEMEDIA',
+    legalName: 'SMK Negeri 4 Tasikmalaya',
     tagline: 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
     coverageText: '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
     whatsappNumber: '0812-3456-7890',
@@ -638,8 +642,8 @@ export async function getCompanySettings() {
   const rawMerged = {
     ...sheetSettings,
     ...extra,
-    name: extra.name || sheetSettings.name || 'PATAS NET',
-    legalName: extra.legalName || sheetSettings.legalName || 'PT. AMANUSA TELEMEDIA',
+    name: extra.name || sheetSettings.name || 'Patas.Net',
+    legalName: extra.legalName || sheetSettings.legalName || 'SMK Negeri 4 Tasikmalaya',
     tagline: extra.tagline || sheetSettings.tagline || 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
     coverageText: extra.coverageText || sheetSettings.coverageText || '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
     whatsappNumber: extra.whatsappNumber || sheetSettings.whatsappNumber || '0812-3456-7890',
@@ -648,7 +652,7 @@ export async function getCompanySettings() {
     address: extra.address || sheetSettings.address || 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
     logoText: extra.logoText || sheetSettings.logoText || 'PATAS NET',
     themeColor: extra.themeColor || sheetSettings.themeColor || '#2563eb',
-    logoUrl: normalizeGoogleDriveImageUrl(extra.logoUrl || sheetSettings.logoUrl || ''),
+    logoUrl: normalizeGoogleDriveImageUrl(extra.logoUrl || sheetSettings.logoUrl || EMBEDDED_DRIVE_LOGO_URL),
     qrisUrl: normalizeGoogleDriveImageUrl(extra.qrisUrl || sheetSettings.qrisUrl || ''),
     promos: Array.isArray(extra.promos) && extra.promos.length > 0
       ? extra.promos.map((p: string) => normalizeGoogleDriveImageUrl(p))

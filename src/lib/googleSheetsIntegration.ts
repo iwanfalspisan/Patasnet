@@ -1,6 +1,19 @@
 import defaultSheetsConfig from '../../data/sheets_config.json';
 
 /**
+ * HARDCODED / EMBEDDED GOOGLE SHEETS, GOOGLE DRIVE & APPS SCRIPT LINKS
+ * Ensures the website always loads the exact same data and images across all devices,
+ * browsers, Incognito tabs, and Vercel deployments without ever starting empty.
+ */
+export const EMBEDDED_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbxXScZJqOQ9myhQkmxUBClZx8LGj0xBgPxIskOTBMr_o4-hfQ-Tqq0dqus6jaOZX5gr/exec';
+export const EMBEDDED_SPREADSHEET_URL =
+  'https://docs.google.com/spreadsheets/d/1N_qoqU4a5Zu3wXrAQk3GKyNGWuiPtjl2BVf2BpX0TaM/edit?gid=0#gid=0';
+export const EMBEDDED_SPREADSHEET_ID = '1N_qoqU4a5Zu3wXrAQk3GKyNGWuiPtjl2BVf2BpX0TaM';
+export const EMBEDDED_DRIVE_LOGO_URL = 'https://lh3.googleusercontent.com/d/19XTAmSKJriECYxElOmTLkvxpdhuP1wgA';
+export const EMBEDDED_DRIVE_FOLDER_NAME = 'PatasNet_Drive';
+
+/**
  * Google Sheets & Google Drive Cloud Database Integration for Patas Net
  *
  * Converts any Google Drive sharing URL into a direct, fast-loading image URL
@@ -10,6 +23,11 @@ export function normalizeGoogleDriveImageUrl(url?: string | null): string {
   if (!url || typeof url !== 'string') return '';
   const trimmed = url.trim();
   if (!trimmed) return '';
+
+  // Map legacy local upload logo path directly to the permanent Google Drive logo URL so it works on Vercel & all devices
+  if (trimmed === '/uploads/logos/logo_patasnet_1793121396292.png') {
+    return EMBEDDED_DRIVE_LOGO_URL;
+  }
 
   // Already a base64 data URI or local upload path
   if (trimmed.startsWith('data:') || trimmed.startsWith('/uploads/') || trimmed.startsWith('/logo')) {
@@ -56,8 +74,8 @@ export function sanitizeSheetSettings<T extends Record<string, any>>(settings: T
   };
 
   const defaults: Record<string, string> = {
-    name: 'PATAS NET',
-    legalName: 'PT. AMANUSA TELEMEDIA',
+    name: 'Patas.Net',
+    legalName: 'SMK Negeri 4 Tasikmalaya',
     tagline: 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
     coverageText: '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
     whatsappNumber: '0812-3456-7890',
@@ -66,6 +84,7 @@ export function sanitizeSheetSettings<T extends Record<string, any>>(settings: T
     address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
     logoText: 'PATAS NET',
     themeColor: '#2563eb',
+    logoUrl: EMBEDDED_DRIVE_LOGO_URL,
   };
 
   for (const key of Object.keys(cleaned)) {
@@ -78,6 +97,10 @@ export function sanitizeSheetSettings<T extends Record<string, any>>(settings: T
         cleaned[key] = val.substring(1);
       }
     }
+  }
+
+  if (cleaned.logoUrl === '/uploads/logos/logo_patasnet_1793121396292.png') {
+    cleaned.logoUrl = EMBEDDED_DRIVE_LOGO_URL;
   }
 
   if (hadFormulaError) {
@@ -105,8 +128,8 @@ export function extractSpreadsheetId(url?: string | null): string | null {
 }
 
 /**
- * Returns the default Google Sheets Web App URL from Vite Environment Variables
- * (for Vercel deployment) or data/sheets_config.json.
+ * Returns the default Google Sheets Web App URL from Vite Environment Variables,
+ * data/sheets_config.json, or the hardcoded EMBEDDED_APPS_SCRIPT_URL.
  */
 export function getEnvOrDefaultSheetsUrl(): string {
   try {
@@ -125,11 +148,11 @@ export function getEnvOrDefaultSheetsUrl(): string {
   try {
     if (defaultSheetsConfig && typeof (defaultSheetsConfig as any).webAppUrl === 'string') {
       const cfgUrl = (defaultSheetsConfig as any).webAppUrl.trim();
-      if (cfgUrl) return cfgUrl;
+      if (cfgUrl && isAppsScriptWebAppUrl(cfgUrl)) return cfgUrl;
     }
   } catch {}
 
-  return '';
+  return EMBEDDED_APPS_SCRIPT_URL;
 }
 
 export const GOOGLE_APPS_SCRIPT_TEMPLATE = `/**

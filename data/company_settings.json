@@ -8,13 +8,15 @@
   "instagramUrl": "https://instagram.com/patasnet.id",
   "facebookUrl": "https://facebook.com/patasnet.id",
   "youtubeUrl": "https://youtube.com/@patasnet",
-  "name": "PATAS NET",
+  "name": "Patas.Net",
   "address": "Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110",
   "logoText": "PATAS NET",
   "themeColor": "#2563eb",
-  "logoUrl": "/uploads/logos/logo_patasnet_1793121396292.png",
-  "qrisMerchantName": "PATAS NET - SMK Negeri 4 Tasikmalaya",
+  "logoUrl": "https://lh3.googleusercontent.com/d/19XTAmSKJriECYxElOmTLkvxpdhuP1wgA",
+  "qrisMerchantName": "PATAS NET - PT AMANUSA TELEMEDIA",
   "qrisNmid": "ID1020039281747",
   "qrisAutoVerify": true,
-  "qrisInstructions": "Scan barcode QRIS dengan aplikasi Mobile Banking atau e-Wallet apa pun. Setelah bayar, klik Konfirmasi Pembayaran QRIS."
+  "qrisInstructions": "Scan barcode QRIS dengan m-Banking atau e-Wallet, lalu klik Konfirmasi Pembayaran QRIS.",
+  "promos": [],
+  "qrisUrl": ""
 }

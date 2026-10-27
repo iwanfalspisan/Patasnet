@@ -40,8 +40,15 @@ import { PACKAGES } from './Home';
 import Logo from './Logo';
 import ImagePreviewModal from './ImagePreviewModal';
 import GoogleSpreadsheetViewer from './GoogleSpreadsheetViewer';
-import { GOOGLE_APPS_SCRIPT_TEMPLATE } from '../lib/googleSheetsIntegration';
-import { getGoogleSheetsWebhookUrl, saveGoogleSheetsWebhookUrl } from '../lib/clientFallback';
+import {
+  GOOGLE_APPS_SCRIPT_TEMPLATE,
+  EMBEDDED_APPS_SCRIPT_URL,
+  EMBEDDED_SPREADSHEET_URL,
+  EMBEDDED_DRIVE_LOGO_URL,
+  EMBEDDED_DRIVE_FOLDER_NAME,
+  normalizeGoogleDriveImageUrl,
+} from '../lib/googleSheetsIntegration';
+import { getGoogleSheetsWebhookUrl, saveGoogleSheetsWebhookUrl, syncToGoogleSheets } from '../lib/clientFallback';
 import { generateDefaultQrisSvg } from '../lib/qrisUtils';
 import {
   AreaChart,
@@ -88,8 +95,8 @@ export default function AdminDashboard({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedUserForMap, setSelectedUserForMap] = useState<CustomerUser | null>(null);
 
-  // Google Sheets Webhook URL state
-  const [googleSheetsUrl, setGoogleSheetsUrl] = useState(getGoogleSheetsWebhookUrl());
+  // Google Sheets Webhook URL state (pre-embedded in code)
+  const [googleSheetsUrl, setGoogleSheetsUrl] = useState(getGoogleSheetsWebhookUrl() || EMBEDDED_APPS_SCRIPT_URL);
   const [isTestingSheets, setIsTestingSheets] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
 
@@ -104,8 +111,8 @@ export default function AdminDashboard({
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   // Company Settings form states
-  const [companyNameInput, setCompanyNameInput] = useState(companySettings?.name || 'Patas Net WiFi');
-  const [companyLegalNameInput, setCompanyLegalNameInput] = useState(companySettings?.legalName || 'PT. AMANUSA TELEMEDIA');
+  const [companyNameInput, setCompanyNameInput] = useState(companySettings?.name || 'Patas.Net');
+  const [companyLegalNameInput, setCompanyLegalNameInput] = useState(companySettings?.legalName || 'SMK Negeri 4 Tasikmalaya');
   const [companyTaglineInput, setCompanyTaglineInput] = useState(companySettings?.tagline || 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota');
   const [companyCoverageTextInput, setCompanyCoverageTextInput] = useState(companySettings?.coverageText || '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan');
   const [companyWhatsappNumberInput, setCompanyWhatsappNumberInput] = useState(companySettings?.whatsappNumber || '0812-3456-7890');
@@ -116,7 +123,7 @@ export default function AdminDashboard({
   const [companyYoutubeUrlInput, setCompanyYoutubeUrlInput] = useState(companySettings?.youtubeUrl || 'https://youtube.com/@patasnet');
   const [companyAddressInput, setCompanyAddressInput] = useState(companySettings?.address || 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110');
   const [companyLogoTextInput, setCompanyLogoTextInput] = useState(companySettings?.logoText || 'PATAS NET');
-  const [companyLogoUrlInput, setCompanyLogoUrlInput] = useState(companySettings?.logoUrl || '');
+  const [companyLogoUrlInput, setCompanyLogoUrlInput] = useState(companySettings?.logoUrl || EMBEDDED_DRIVE_LOGO_URL);
   const [savingSettings, setSavingSettings] = useState(false);
   const [sendingReminderId, setSendingReminderId] = useState<string | null>(null);
 
@@ -632,28 +639,14 @@ export default function AdminDashboard({
       const base64 = reader.result as string;
       setQrisUrlInput(base64);
 
-      // Also persist to /api/upload to guarantee disk & static access
-      try {
-        const uRes = await fetch('/api/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: base64,
-            category: 'qris',
-            filename: `qris_${Date.now()}`,
-          }),
-        });
-        if (uRes.ok) {
-          const uJson = await uRes.json();
-          if (uJson.url) {
-            setQrisUrlInput(uJson.url);
-          }
-        }
-      } catch (uErr) {
-        console.warn('Upload API fallback to dataUrl:', uErr);
-      }
+      // Upload directly to Google Drive via Apps Script so all devices load the Google Drive image URL
+      syncToGoogleSheets('update_settings', {
+        name: companyNameInput,
+        qrisBase64: base64,
+        qrisUrl: base64,
+      }).catch(() => {});
 
-      showToast('Gambar barcode QRIS berhasil diunggah dan disinkronkan ke semua perangkat!');
+      showToast('Gambar barcode QRIS berhasil diunggah ke Google Drive dan disinkronkan ke semua perangkat!');
       setUploadingQris(false);
 
       if (onUpdateCompanySettings) {
@@ -672,34 +665,19 @@ export default function AdminDashboard({
       const base64 = reader.result as string;
       setCompanyLogoUrlInput(base64);
 
-      let finalLogoUrl = base64;
-      try {
-        const uRes = await fetch('/api/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: base64,
-            category: 'logos',
-            filename: `logo_${Date.now()}`,
-          }),
-        });
-        if (uRes.ok) {
-          const uJson = await uRes.json();
-          if (uJson.url) {
-            finalLogoUrl = uJson.url;
-            setCompanyLogoUrlInput(uJson.url);
-          }
-        }
-      } catch (uErr) {
-        console.warn('Logo upload fallback to dataUrl:', uErr);
-      }
+      // Upload directly to Google Drive via Apps Script so all devices load the Google Drive image URL
+      syncToGoogleSheets('update_settings', {
+        name: companyNameInput,
+        logoBase64: base64,
+        logoUrl: base64,
+      }).catch(() => {});
 
-      showToast('Logo berhasil diunggah dan disinkronkan ke semua browser & perangkat!');
+      showToast('Logo berhasil diunggah ke Google Drive dan disinkronkan ke semua browser & perangkat!');
 
       if (onUpdateCompanySettings) {
         onUpdateCompanySettings({
           name: companyNameInput,
-          logoUrl: finalLogoUrl,
+          logoUrl: base64,
         });
       }
     };
@@ -3208,11 +3186,31 @@ function doPost(e) {
                     placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
                     className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-xs font-mono text-slate-800 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                   />
+                  <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-xl space-y-1.5 text-[11px]">
+                    <div className="font-extrabold text-emerald-900 flex items-center gap-1.5">
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Link Database Tertanam Permanen di Kode Website (Aktif Otomatis di Semua Perangkat)</span>
+                    </div>
+                    <div className="grid grid-cols-1 gap-1 text-[10px] text-slate-700 font-mono">
+                      <div className="truncate">
+                        <strong className="text-slate-900">Google Sheets:</strong>{' '}
+                        <a href={EMBEDDED_SPREADSHEET_URL} target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                          {EMBEDDED_SPREADSHEET_URL}
+                        </a>
+                      </div>
+                      <div className="truncate">
+                        <strong className="text-slate-900">Apps Script:</strong> {EMBEDDED_APPS_SCRIPT_URL}
+                      </div>
+                      <div className="truncate">
+                        <strong className="text-slate-900">Google Drive Folder:</strong> {EMBEDDED_DRIVE_FOLDER_NAME} (Logo: {normalizeGoogleDriveImageUrl(companyLogoUrlInput || EMBEDDED_DRIVE_LOGO_URL)})
+                      </div>
+                    </div>
+                  </div>
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="text-slate-400">
                       Status:{' '}
-                      <strong className={googleSheetsUrl ? 'text-emerald-600' : 'text-amber-600'}>
-                        {googleSheetsUrl ? 'Terkonfigurasi' : 'Belum Terhubung'}
+                      <strong className="text-emerald-600">
+                        Tertanam di Kode & Terhubung Otomatis
                       </strong>
                     </span>
                     <button

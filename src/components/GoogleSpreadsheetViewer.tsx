@@ -1,5 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { FileSpreadsheet, RefreshCw, Download, ExternalLink, Search, CheckCircle2, Database, Table2 } from 'lucide-react';
+import {
+  EMBEDDED_APPS_SCRIPT_URL,
+  EMBEDDED_SPREADSHEET_URL,
+  normalizeGoogleDriveImageUrl,
+  sanitizeSheetSettings,
+} from '../lib/googleSheetsIntegration';
 
 interface GoogleSpreadsheetViewerProps {
   webAppUrl?: string;
@@ -49,6 +55,79 @@ export default function GoogleSpreadsheetViewer({
         const data = await res.json();
         if (data && data.database) {
           setSheetsDb(data.database);
+          setLoading(false);
+          return;
+        }
+      }
+    } catch {
+      // Fallback to direct Google Apps Script Web App URL on static Vercel deployments
+    }
+
+    try {
+      const targetUrl = webAppUrl && webAppUrl.includes('script.google.com') ? webAppUrl : EMBEDDED_APPS_SCRIPT_URL;
+      const directRes = await fetch(targetUrl, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        redirect: 'follow',
+      });
+      if (directRes.ok) {
+        const ext = await directRes.json();
+        if (ext && ext.status === 'success') {
+          const pelangganRows: any[][] = (ext.customers || []).map((c: any) => [
+            c.createdAt || '',
+            c.id || '',
+            c.name || '',
+            c.email || '',
+            c.phone || '',
+            c.address || '',
+            Array.isArray(c.coordinates) ? c.coordinates.join(', ') : c.coordinates || '',
+            c.packageId || 'home-20m',
+            c.status || 'active',
+            normalizeGoogleDriveImageUrl(c.ktpImageUrl) || '',
+          ]);
+          const pembayaranRows: any[][] = [];
+          (ext.customers || []).forEach((c: any) => {
+            (c.payments || []).forEach((p: any) => {
+              pembayaranRows.push([
+                p.date || '',
+                p.id || '',
+                c.id || '',
+                c.name || '',
+                p.amount || 170000,
+                p.billingPeriod || 'Bulan Berjalan',
+                p.method || 'Transfer Bank',
+                p.status || 'unpaid',
+                normalizeGoogleDriveImageUrl(p.proofOfPaymentUrl) || '',
+              ]);
+            });
+          });
+          const tiketRows: any[][] = (ext.tickets || []).map((t: any) => [
+            t.date || '',
+            t.id || '',
+            t.userId || '',
+            t.userName || '',
+            t.phone || '',
+            t.message || '',
+            t.status || 'open',
+          ]);
+          const cleanSet = sanitizeSheetSettings(ext.settings || {});
+          delete cleanSet._hadFormulaError;
+          const pengaturanRows: any[][] = Object.keys(cleanSet).map((k) => [
+            k,
+            typeof cleanSet[k] === 'object' ? JSON.stringify(cleanSet[k]) : String(cleanSet[k]),
+            new Date().toISOString().replace('T', ' ').substring(0, 19),
+          ]);
+          setSheetsDb((prev) => ({
+            ...prev,
+            sheets: {
+              Pelanggan: pelangganRows,
+              Pembayaran: pembayaranRows,
+              Tiket: tiketRows,
+              Pengaturan: pengaturanRows,
+            },
+            lastSyncedAt: new Date().toISOString(),
+            totalRecords: pelangganRows.length + pembayaranRows.length + tiketRows.length + pengaturanRows.length,
+          }));
         }
       }
     } catch (err) {
@@ -152,29 +231,16 @@ export default function GoogleSpreadsheetViewer({
             <span>Ekspor CSV</span>
           </button>
 
-          {webAppUrl ? (
-            <a
-              href={webAppUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1.5 shadow-sm"
-              title="Buka Spreadsheet di Google Drive"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              <span>Buka Google Sheets</span>
-            </a>
-          ) : (
-            <a
-              href="https://sheets.new"
-              target="_blank"
-              rel="noreferrer"
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1.5 shadow-sm"
-              title="Buat Google Spreadsheet Baru"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              <span>Buat Spreadsheet Baru</span>
-            </a>
-          )}
+          <a
+            href={EMBEDDED_SPREADSHEET_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1.5 shadow-sm"
+            title="Buka Spreadsheet di Google Sheets"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            <span>Buka Google Sheets</span>
+          </a>
         </div>
       </div>
 

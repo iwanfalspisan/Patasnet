@@ -5,6 +5,10 @@ import {
   sanitizeSheetSettings,
   isAppsScriptWebAppUrl,
   extractSpreadsheetId,
+  EMBEDDED_APPS_SCRIPT_URL,
+  EMBEDDED_SPREADSHEET_URL,
+  EMBEDDED_DRIVE_LOGO_URL,
+  EMBEDDED_DRIVE_FOLDER_NAME,
 } from './googleSheetsIntegration.ts';
 
 export interface ServerSheetsConfig {
@@ -117,9 +121,9 @@ export function loadSheetsConfig(): ServerSheetsConfig {
       const raw = fs.readFileSync(SHEETS_CONFIG_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
       return {
-        webAppUrl: parsed.webAppUrl || process.env.GOOGLE_SHEETS_WEBHOOK_URL || '',
-        spreadsheetUrl: parsed.spreadsheetUrl || '',
-        driveFolderName: parsed.driveFolderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || 'PatasNet_Drive',
+        webAppUrl: parsed.webAppUrl || process.env.GOOGLE_SHEETS_WEBHOOK_URL || EMBEDDED_APPS_SCRIPT_URL,
+        spreadsheetUrl: parsed.spreadsheetUrl || EMBEDDED_SPREADSHEET_URL,
+        driveFolderName: parsed.driveFolderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || EMBEDDED_DRIVE_FOLDER_NAME,
         autoSync: parsed.autoSync !== undefined ? parsed.autoSync : true,
         syncIntervalSeconds: parsed.syncIntervalSeconds || 3,
         lastSyncedAt: parsed.lastSyncedAt,
@@ -129,8 +133,9 @@ export function loadSheetsConfig(): ServerSheetsConfig {
     console.warn('Error reading sheets config:', e);
   }
   return {
-    webAppUrl: process.env.GOOGLE_SHEETS_WEBHOOK_URL || '',
-    driveFolderName: process.env.GOOGLE_DRIVE_FOLDER_NAME || 'PatasNet_Drive',
+    webAppUrl: process.env.GOOGLE_SHEETS_WEBHOOK_URL || EMBEDDED_APPS_SCRIPT_URL,
+    spreadsheetUrl: EMBEDDED_SPREADSHEET_URL,
+    driveFolderName: process.env.GOOGLE_DRIVE_FOLDER_NAME || EMBEDDED_DRIVE_FOLDER_NAME,
     autoSync: true,
     syncIntervalSeconds: 3,
   };
@@ -283,12 +288,12 @@ export function getGoogleSheetsDatabase(): GoogleSheetsDatabase {
         ],
       ],
       Pengaturan: [
-        ['name', 'PATAS NET', new Date().toISOString()],
+        ['name', 'Patas.Net', new Date().toISOString()],
         ['logoText', 'PATAS NET', new Date().toISOString()],
-        ['logoUrl', '', new Date().toISOString()],
-        ['tagline', 'Internet Cepat Harga Merakyat', new Date().toISOString()],
+        ['logoUrl', EMBEDDED_DRIVE_LOGO_URL, new Date().toISOString()],
+        ['tagline', 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota', new Date().toISOString()],
         ['coverageText', '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan', new Date().toISOString()],
-        ['legalName', 'PT. AMANUSA TELEMEDIA', new Date().toISOString()],
+        ['legalName', 'SMK Negeri 4 Tasikmalaya', new Date().toISOString()],
         ['whatsappNumber', '0812-3456-7890', new Date().toISOString()],
         ['phoneNumber', '+62 899-3299-977', new Date().toISOString()],
         ['themeColor', '#2563eb', new Date().toISOString()],

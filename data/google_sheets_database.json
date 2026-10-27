@@ -2,35 +2,11 @@
   "sheets": {
     "Pelanggan": [
       [
-        "2026-10-10 18:08:37",
-        "TR-8697",
-        "Ahmad Subagyo",
-        "ahmad.test@patasnet.id",
-        "081288889999",
-        "Jl. Mampang Prapatan No. 10",
-        "-6.2088, 106.8456",
-        "home-20m",
-        "pending",
-        ""
-      ],
-      [
-        "2026-10-10 17:27:52",
-        "TR-TEST-999",
-        "Uji Presisi",
-        "presisi@patasnet.id",
-        "081234567890",
-        "Jl. Merdeka",
-        "-6.2088, 106.8456",
-        "home-20m",
-        "active",
-        ""
-      ],
-      [
-        "2026-10-10 17:22:05",
+        "2026-10-27T17:11:50.376Z",
         "TR-1001",
         "Budi Santoso",
         "budi@gmail.com",
-        "081234567890",
+        "81234567890",
         "Jl. Melawai Raya No. 45, Kebayoran Baru, Jakarta Selatan",
         "-6.2443, 106.8005",
         "home-20m",
@@ -38,113 +14,84 @@
         "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80"
       ],
       [
-        "2026-10-10 17:22:05",
+        "2026-10-27T17:11:50.612Z",
         "TR-1002",
         "Dewi Lestari",
         "dewi@gmail.com",
-        "081298765432",
+        "81298765432",
         "Jl. Cipete Raya No. 12, Cilandak, Jakarta Selatan",
         "-6.2781, 106.8052",
-        "home-30m",
+        "patasnet-exclusive",
         "active",
-        "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=400&q=80"
+        "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80"
       ],
       [
-        "2026-10-10 17:22:05",
-        "TR-1003",
-        "Andi Pratama",
-        "andi@gmail.com",
-        "081311223344",
-        "Jl. Pondok Cina No. 8, Beji, Depok",
-        "-6.3686, 106.8322",
-        "home-10m",
+        "2026-10-27T17:13:18.742Z",
+        "TR-TEST-3068",
+        "Uji Coba Sinkronisasi",
+        "uji.8016@patasnet.id",
+        "81234567890",
+        "Jl. Uji Coba Integrasi No. 1, Jakarta",
+        "-6.2088, 106.8456",
+        "home-20m",
         "active",
-        "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80"
+        ""
       ]
     ],
     "Pembayaran": [
       [
-        "2026-10-10 18:08:37",
-        "PAY-13336",
-        "TR-8697",
-        "Ahmad Subagyo",
-        170000,
-        "Bulan Pertama",
-        "QRIS / Transfer",
-        "unpaid",
-        ""
-      ],
-      [
-        "2026-10-10 17:27:52",
-        "PAY-9732",
-        "TR-TEST-999",
-        "Uji Presisi",
-        170000,
-        "Bulan Pertama",
-        "QRIS / Transfer",
-        "unpaid",
-        ""
-      ],
-      [
-        "2026-10-10 17:22:05",
+        "2026-10-28",
         "PAY-7001",
         "TR-1001",
         "Budi Santoso",
         170000,
-        "Juli 2026",
+        "Bulan Berjalan",
         "Transfer Bank BCA",
         "paid",
-        "https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80"
+        "https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80",
+        "TX-88001122"
       ],
       [
-        "2026-10-10 17:22:05",
+        "2026-10-28",
         "PAY-7002",
         "TR-1002",
         "Dewi Lestari",
-        225000,
-        "Juli 2026",
-        "QRIS Semua Pembayaran",
-        "paid",
-        "https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80"
-      ],
-      [
-        "2026-10-10 17:22:05",
-        "PAY-7003",
-        "TR-1003",
-        "Andi Pratama",
-        120000,
-        "Bulan Pertama",
-        "Transfer Bank Mandiri",
+        275000,
+        "Bulan Berjalan",
+        "QRIS",
         "paid",
         "https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80",
-        "TX-88009302"
+        "TX-88001123"
+      ],
+      [
+        "2026-10-28",
+        "PAY-14855",
+        "TR-TEST-3068",
+        "Uji Coba Sinkronisasi",
+        170000,
+        "Bulan Pertama",
+        "QRIS / Transfer",
+        "unpaid",
+        "",
+        ""
       ]
     ],
     "Tiket": [
       [
-        "2026-10-10 17:22:05",
-        "TKT-901",
+        "2026-10-28 00:11",
+        "TCK-5001",
         "TR-1001",
         "Budi Santoso",
-        "081234567890",
-        "Lampu indikator LOS merah berkedip setelah hujan deras",
-        "resolved"
-      ],
-      [
-        "2026-10-10 17:22:05",
-        "TKT-902",
-        "TR-1003",
-        "Andi Pratama",
-        "081311223344",
-        "Permintaan penyesuaian jadwal survei teknisi ke rumah",
-        "in_progress"
+        "81234567890",
+        "Lampu indikator modem berkedip setelah hujan deras sore tadi.",
+        "open"
       ]
     ],
     "Pengaturan": [
       [
         "name",
-        "PATAS NET",
-        "2026-10-27 17:42:59"
+        "Patas.Net",
+        "2026-10-27 17:51:48"
       ],
       [
         "logoText",
@@ -203,8 +150,8 @@
       ],
       [
         "qrisMerchantName",
-        "PATAS NET - SMK Negeri 4 Tasikmalaya",
-        "2026-10-27 17:42:59"
+        "PATAS NET - PT AMANUSA TELEMEDIA",
+        "2026-10-27 17:51:48"
       ],
       [
         "qrisNmid",
@@ -218,8 +165,8 @@
       ],
       [
         "qrisInstructions",
-        "Scan barcode QRIS dengan aplikasi Mobile Banking atau e-Wallet apa pun. Setelah bayar, klik Konfirmasi Pembayaran QRIS.",
-        "2026-10-27 17:42:59"
+        "Scan barcode QRIS dengan m-Banking atau e-Wallet, lalu klik Konfirmasi Pembayaran QRIS.",
+        "2026-10-27 17:51:48"
       ],
       [
         "instagramUrl",
@@ -282,6 +229,6 @@
       "UpdatedAt"
     ]
   },
-  "lastSyncedAt": "2026-10-27T17:42:59.188Z",
-  "totalRecords": 32
+  "lastSyncedAt": "2026-10-27T17:53:14.795Z",
+  "totalRecords": 27
 }

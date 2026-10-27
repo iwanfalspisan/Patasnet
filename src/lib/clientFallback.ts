@@ -5,6 +5,9 @@ import {
   sanitizeSheetSettings,
   isAppsScriptWebAppUrl,
   STORAGE_SHEETS_CONFIG_KEY,
+  EMBEDDED_APPS_SCRIPT_URL,
+  EMBEDDED_SPREADSHEET_ID,
+  EMBEDDED_DRIVE_LOGO_URL,
 } from './googleSheetsIntegration';
 
 const STORAGE_CUSTOMERS_KEY = 'patasnet_customers_v1';
@@ -28,13 +31,10 @@ export function getGoogleSheetsWebhookUrl(): string {
     if (isAppsScriptWebAppUrl(stored)) return stored;
     if (isAppsScriptWebAppUrl(v2Url)) return v2Url;
     if (isAppsScriptWebAppUrl(envUrl)) return envUrl;
-
-    if (stored) return stored;
-    if (v2Url) return v2Url;
   } catch {
     // ignore
   }
-  return envUrl;
+  return EMBEDDED_APPS_SCRIPT_URL;
 }
 
 export function saveGoogleSheetsWebhookUrl(url: string): void {
@@ -43,8 +43,6 @@ export function saveGoogleSheetsWebhookUrl(url: string): void {
     if (!trimmed) return;
     const current = (localStorage.getItem(STORAGE_SHEETS_URL_KEY) || '').trim();
 
-    // If localStorage already has a valid Apps Script /exec URL and incoming URL is a docs.google.com view link,
-    // keep the valid Apps Script /exec URL and sync it back to the server!
     if (isAppsScriptWebAppUrl(current) && !isAppsScriptWebAppUrl(trimmed)) {
       fetch('/api/sheets/config', {
         method: 'POST',
@@ -62,7 +60,7 @@ export function saveGoogleSheetsWebhookUrl(url: string): void {
 
 // Background sync to Google Sheets & Drive Webhook (100% compatible with Vercel static/serverless hosting)
 export async function syncToGoogleSheets(action: string, payload: any): Promise<boolean> {
-  const url = getGoogleSheetsWebhookUrl();
+  const url = getGoogleSheetsWebhookUrl() || EMBEDDED_APPS_SCRIPT_URL;
   let success = false;
 
   const cleanPayload =
@@ -146,13 +144,13 @@ export async function fetchFromGoogleSheets(): Promise<{
   packages?: WifiPackage[];
   coverage?: any[];
 } | null> {
-  const url = getGoogleSheetsWebhookUrl();
+  const url = getGoogleSheetsWebhookUrl() || EMBEDDED_APPS_SCRIPT_URL;
 
   try {
     let data: any = null;
     let fetchedDirectlyFromAppsScript = false;
 
-    // 1. If a Google Apps Script Web App URL is configured, fetch directly from Google Sheets first for 100% live cloud data across all devices
+    // 1. Fetch directly from the embedded Google Apps Script Web App URL for 100% live cloud data across all devices
     if (url && isAppsScriptWebAppUrl(url)) {
       try {
         const res = await fetch(url, {
@@ -170,7 +168,7 @@ export async function fetchFromGoogleSheets(): Promise<{
           }
         }
       } catch {
-        // Fallback to server proxy below
+        // Fallback to server proxy or direct Gviz reader below
       }
     }
 
@@ -190,6 +188,35 @@ export async function fetchFromGoogleSheets(): Promise<{
       } catch {
         // server offline on static Vercel
       }
+    }
+
+    // 3. Fallback: Direct Google Spreadsheet Gviz reader using EMBEDDED_SPREADSHEET_ID
+    if (!data && EMBEDDED_SPREADSHEET_ID) {
+      try {
+        const pengRes = await fetch(
+          `https://docs.google.com/spreadsheets/d/${EMBEDDED_SPREADSHEET_ID}/gviz/tq?tqx=out:json&sheet=Pengaturan`
+        );
+        if (pengRes.ok) {
+          const txt = await pengRes.text();
+          const m = txt.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);?/);
+          if (m && m[1]) {
+            const gvizJson = JSON.parse(m[1]);
+            const rows = gvizJson?.table?.rows || [];
+            const gSettings: Record<string, any> = {};
+            rows.forEach((r: any) => {
+              const cells = r?.c;
+              if (Array.isArray(cells) && cells[0]?.v && cells[0].v !== 'Key') {
+                const k = String(cells[0].v).trim();
+                const v = cells[1]?.v !== undefined && cells[1]?.v !== null ? String(cells[1].v) : '';
+                gSettings[k] = k === 'qrisAutoVerify' ? v.toLowerCase() === 'true' : v;
+              }
+            });
+            if (Object.keys(gSettings).length > 0) {
+              data = { status: 'success', settings: gSettings };
+            }
+          }
+        }
+      } catch {}
     }
 
     if (data && data.status === 'success') {
@@ -221,7 +248,7 @@ export async function fetchFromGoogleSheets(): Promise<{
 
         normalizedSettings = {
           ...sanitized,
-          logoUrl: normalizeGoogleDriveImageUrl(sanitized.logoUrl) || sanitized.logoUrl || '',
+          logoUrl: normalizeGoogleDriveImageUrl(sanitized.logoUrl) || sanitized.logoUrl || EMBEDDED_DRIVE_LOGO_URL,
           qrisUrl: normalizeGoogleDriveImageUrl(sanitized.qrisUrl) || sanitized.qrisUrl || '',
           promos: Array.isArray(sanitized.promos)
             ? sanitized.promos.map((pr: string) => normalizeGoogleDriveImageUrl(pr) || pr)
@@ -229,14 +256,11 @@ export async function fetchFromGoogleSheets(): Promise<{
         };
         saveLocalSettings(normalizedSettings);
 
-        // If the Google Sheet had "#ERROR!" in phoneNumber, automatically repair the sheet cell!
         if (hadFormulaError && fetchedDirectlyFromAppsScript) {
           syncToGoogleSheets('update_settings', normalizedSettings).catch(() => {});
         }
       }
 
-      // If this client fetched directly from Google Apps Script, mirror the fresh data and Web App URL
-      // to the server so ALL other browser windows and devices immediately display the exact same settings & data!
       if (fetchedDirectlyFromAppsScript) {
         fetch('/api/sheets/mirror', {
           method: 'POST',
@@ -263,13 +287,13 @@ export async function fetchFromGoogleSheets(): Promise<{
 }
 
 export const DEFAULT_COMPANY_SETTINGS = {
-  name: 'PATAS NET',
-  legalName: 'PT. AMANUSA TELEMEDIA',
+  name: 'Patas.Net',
+  legalName: 'SMK Negeri 4 Tasikmalaya',
   tagline: 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
   address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
   logoText: 'PATAS NET',
   themeColor: '#2563eb',
-  logoUrl: '',
+  logoUrl: EMBEDDED_DRIVE_LOGO_URL,
   coverageText: '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
   whatsappNumber: '0812-3456-7890',
   phoneNumber: '+62 899-3299-977',

@@ -1,7 +1,10 @@
 {
-  "webAppUrl": "",
+  "webAppUrl": "https://script.google.com/macros/s/AKfycbxXScZJqOQ9myhQkmxUBClZx8LGj0xBgPxIskOTBMr_o4-hfQ-Tqq0dqus6jaOZX5gr/exec",
+  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/1N_qoqU4a5Zu3wXrAQk3GKyNGWuiPtjl2BVf2BpX0TaM/edit?gid=0#gid=0",
+  "spreadsheetId": "1N_qoqU4a5Zu3wXrAQk3GKyNGWuiPtjl2BVf2BpX0TaM",
+  "driveLogoUrl": "https://lh3.googleusercontent.com/d/19XTAmSKJriECYxElOmTLkvxpdhuP1wgA",
   "driveFolderName": "PatasNet_Drive",
   "autoSync": true,
-  "syncIntervalSeconds": 4,
-  "lastSyncedAt": "2026-10-20T04:57:46.816Z"
+  "syncIntervalSeconds": 3,
+  "lastSyncedAt": "2026-10-27T17:54:00.000Z"
 }
