@@ -6,7 +6,7 @@ import {
   saveGoogleSheetsDatabase,
   syncSheetsWebhook,
 } from '../lib/serverSheets.ts';
-import { normalizeGoogleDriveImageUrl } from '../lib/googleSheetsIntegration.ts';
+import { normalizeGoogleDriveImageUrl, sanitizeSheetSettings } from '../lib/googleSheetsIntegration.ts';
 
 // ---------------------- PACKAGES & COVERAGE STORE (PERSISTED TO DISK & SHEETS) ----------------------
 
@@ -579,19 +579,32 @@ function saveExtraCompanySettings(data: Record<string, any>) {
     const dir = path.dirname(EXTRA_SETTINGS_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const current = loadExtraCompanySettings();
-    const processed = { ...data };
+    const cleanedInput: Record<string, any> = {};
+    Object.keys(data).forEach((k) => {
+      if (data[k] !== undefined) {
+        cleanedInput[k] = data[k];
+      }
+    });
+    const processed = sanitizeSheetSettings(cleanedInput);
+    delete processed._hadFormulaError;
+
     if (processed.logoUrl && String(processed.logoUrl).trim() !== '') {
       processed.logoUrl = persistImageForCrossDevice(processed.logoUrl, 'logos', 'logo_patasnet');
+    } else if (current.logoUrl) {
+      processed.logoUrl = current.logoUrl;
     }
     if (processed.qrisUrl && String(processed.qrisUrl).trim() !== '') {
       processed.qrisUrl = persistImageForCrossDevice(processed.qrisUrl, 'qris', 'qris_patasnet');
+    } else if (current.qrisUrl) {
+      processed.qrisUrl = current.qrisUrl;
     }
     if (Array.isArray(processed.promos)) {
       processed.promos = processed.promos.map((pr: string, idx: number) =>
         persistImageForCrossDevice(pr, 'promos', `promo_${idx}`)
       );
     }
-    const merged = { ...current, ...processed };
+    const merged = sanitizeSheetSettings({ ...current, ...processed });
+    delete merged._hadFormulaError;
     fs.writeFileSync(EXTRA_SETTINGS_PATH, JSON.stringify(merged, null, 2), 'utf-8');
   } catch (e) {
     console.warn('Error saving extra company settings:', e);
@@ -609,26 +622,43 @@ export async function getCompanySettings() {
     if (key && val !== undefined && val !== null && String(val).trim() !== '') {
       if (key === 'qrisAutoVerify') {
         sheetSettings[key] = String(val) === 'true' || val === true;
+      } else if (key === 'promos') {
+        try {
+          const parsedPromos = typeof val === 'string' ? JSON.parse(val) : val;
+          if (Array.isArray(parsedPromos)) {
+            sheetSettings.promos = parsedPromos;
+          }
+        } catch {}
       } else {
         sheetSettings[key] = val;
       }
     }
   });
 
-  const merged = {
-    ...extra,
+  const rawMerged = {
     ...sheetSettings,
-    name: sheetSettings.name || extra.name || 'Patas Net WiFi',
-    address: sheetSettings.address || extra.address || 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
-    logoText: sheetSettings.logoText || extra.logoText || 'PATAS NET',
-    themeColor: sheetSettings.themeColor || extra.themeColor || '#2563eb',
-    logoUrl: normalizeGoogleDriveImageUrl(sheetSettings.logoUrl || extra.logoUrl || ''),
-    qrisUrl: normalizeGoogleDriveImageUrl(sheetSettings.qrisUrl || extra.qrisUrl || ''),
-    promos: Array.isArray(extra.promos)
+    ...extra,
+    name: extra.name || sheetSettings.name || 'PATAS NET',
+    legalName: extra.legalName || sheetSettings.legalName || 'PT. AMANUSA TELEMEDIA',
+    tagline: extra.tagline || sheetSettings.tagline || 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
+    coverageText: extra.coverageText || sheetSettings.coverageText || '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
+    whatsappNumber: extra.whatsappNumber || sheetSettings.whatsappNumber || '0812-3456-7890',
+    phoneNumber: extra.phoneNumber || sheetSettings.phoneNumber || '+62 899-3299-977',
+    email: extra.email || sheetSettings.email || 'cs@patasnet.id',
+    address: extra.address || sheetSettings.address || 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
+    logoText: extra.logoText || sheetSettings.logoText || 'PATAS NET',
+    themeColor: extra.themeColor || sheetSettings.themeColor || '#2563eb',
+    logoUrl: normalizeGoogleDriveImageUrl(extra.logoUrl || sheetSettings.logoUrl || ''),
+    qrisUrl: normalizeGoogleDriveImageUrl(extra.qrisUrl || sheetSettings.qrisUrl || ''),
+    promos: Array.isArray(extra.promos) && extra.promos.length > 0
       ? extra.promos.map((p: string) => normalizeGoogleDriveImageUrl(p))
+      : Array.isArray(sheetSettings.promos)
+      ? sheetSettings.promos.map((p: string) => normalizeGoogleDriveImageUrl(p))
       : [],
   };
 
+  const merged = sanitizeSheetSettings(rawMerged);
+  delete merged._hadFormulaError;
   return merged;
 }
 

@@ -1,5 +1,11 @@
 import { CustomerUser, PaymentRecord, SupportTicket, WifiPackage } from '../types';
-import { normalizeGoogleDriveImageUrl, getEnvOrDefaultSheetsUrl } from './googleSheetsIntegration';
+import {
+  normalizeGoogleDriveImageUrl,
+  getEnvOrDefaultSheetsUrl,
+  sanitizeSheetSettings,
+  isAppsScriptWebAppUrl,
+  STORAGE_SHEETS_CONFIG_KEY,
+} from './googleSheetsIntegration';
 
 const STORAGE_CUSTOMERS_KEY = 'patasnet_customers_v1';
 const STORAGE_TICKETS_KEY = 'patasnet_tickets_v1';
@@ -7,20 +13,48 @@ const STORAGE_SETTINGS_KEY = 'patasnet_settings_v1';
 export const STORAGE_SHEETS_URL_KEY = 'patasnet_google_sheets_url';
 
 export function getGoogleSheetsWebhookUrl(): string {
+  const envUrl = getEnvOrDefaultSheetsUrl();
   try {
-    const stored = localStorage.getItem(STORAGE_SHEETS_URL_KEY);
-    if (stored && stored.trim() !== '') {
-      return stored.trim();
+    const stored = (localStorage.getItem(STORAGE_SHEETS_URL_KEY) || '').trim();
+    let v2Url = '';
+    const rawV2 = localStorage.getItem(STORAGE_SHEETS_CONFIG_KEY);
+    if (rawV2) {
+      try {
+        v2Url = (JSON.parse(rawV2)?.webAppUrl || '').trim();
+      } catch {}
     }
+
+    // Prefer a valid Google Apps Script Web App URL (script.google.com/macros/s/.../exec)
+    if (isAppsScriptWebAppUrl(stored)) return stored;
+    if (isAppsScriptWebAppUrl(v2Url)) return v2Url;
+    if (isAppsScriptWebAppUrl(envUrl)) return envUrl;
+
+    if (stored) return stored;
+    if (v2Url) return v2Url;
   } catch {
     // ignore
   }
-  return getEnvOrDefaultSheetsUrl();
+  return envUrl;
 }
 
 export function saveGoogleSheetsWebhookUrl(url: string): void {
   try {
-    localStorage.setItem(STORAGE_SHEETS_URL_KEY, url.trim());
+    const trimmed = (url || '').trim();
+    if (!trimmed) return;
+    const current = (localStorage.getItem(STORAGE_SHEETS_URL_KEY) || '').trim();
+
+    // If localStorage already has a valid Apps Script /exec URL and incoming URL is a docs.google.com view link,
+    // keep the valid Apps Script /exec URL and sync it back to the server!
+    if (isAppsScriptWebAppUrl(current) && !isAppsScriptWebAppUrl(trimmed)) {
+      fetch('/api/sheets/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webAppUrl: current }),
+      }).catch(() => {});
+      return;
+    }
+
+    localStorage.setItem(STORAGE_SHEETS_URL_KEY, trimmed);
   } catch (e) {
     console.warn('Failed to save Google Sheets URL:', e);
   }
@@ -31,8 +65,17 @@ export async function syncToGoogleSheets(action: string, payload: any): Promise<
   const url = getGoogleSheetsWebhookUrl();
   let success = false;
 
+  const cleanPayload =
+    action === 'update_settings' || action === 'update_logo' || action === 'update_qris'
+      ? (() => {
+          const s = sanitizeSheetSettings({ ...payload });
+          delete s._hadFormulaError;
+          return s;
+        })()
+      : payload;
+
   // 1. Direct send to Google Apps Script Web App using CORS-safe text/plain (works on Vercel without preflight block)
-  if (url) {
+  if (url && isAppsScriptWebAppUrl(url)) {
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -40,31 +83,30 @@ export async function syncToGoogleSheets(action: string, payload: any): Promise<
         headers: {
           'Content-Type': 'text/plain;charset=utf-8',
         },
-        body: JSON.stringify({ action, ...payload }),
+        body: JSON.stringify({ action, ...cleanPayload }),
       });
       if (response.ok) {
         success = true;
         try {
           const resJson = await response.json();
           if (resJson && resJson.status === 'success') {
-            // Update local records with the newly created Google Drive direct URLs if returned
             if (resJson.logoUrl || resJson.qrisUrl) {
               saveLocalSettings({
                 ...(resJson.logoUrl ? { logoUrl: normalizeGoogleDriveImageUrl(resJson.logoUrl) } : {}),
                 ...(resJson.qrisUrl ? { qrisUrl: normalizeGoogleDriveImageUrl(resJson.qrisUrl) } : {}),
               });
             }
-            if (resJson.ktpUrl && payload.id) {
+            if (resJson.ktpUrl && cleanPayload.id) {
               const custs = getLocalCustomers().map((c) =>
-                c.id === payload.id ? { ...c, ktpImageUrl: normalizeGoogleDriveImageUrl(resJson.ktpUrl) } : c
+                c.id === cleanPayload.id ? { ...c, ktpImageUrl: normalizeGoogleDriveImageUrl(resJson.ktpUrl) } : c
               );
               saveLocalCustomers(custs);
             }
-            if (resJson.proofUrl && payload.paymentId) {
+            if (resJson.proofUrl && cleanPayload.paymentId) {
               const custs = getLocalCustomers().map((c) => ({
                 ...c,
                 payments: (c.payments || []).map((p) =>
-                  p.id === payload.paymentId
+                  p.id === cleanPayload.paymentId
                     ? { ...p, proofOfPaymentUrl: normalizeGoogleDriveImageUrl(resJson.proofUrl) }
                     : p
                 ),
@@ -86,7 +128,7 @@ export async function syncToGoogleSheets(action: string, payload: any): Promise<
     const sRes = await fetch('/api/sheets/proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...payload, url }),
+      body: JSON.stringify({ action, ...cleanPayload, url }),
     });
     if (sRes.ok) success = true;
   } catch {
@@ -108,9 +150,10 @@ export async function fetchFromGoogleSheets(): Promise<{
 
   try {
     let data: any = null;
+    let fetchedDirectlyFromAppsScript = false;
 
-    // 1. If a Google Apps Script Web App URL is configured (e.g., on Vercel), fetch directly from Google Sheets first for 100% live cloud data across all devices
-    if (url) {
+    // 1. If a Google Apps Script Web App URL is configured, fetch directly from Google Sheets first for 100% live cloud data across all devices
+    if (url && isAppsScriptWebAppUrl(url)) {
       try {
         const res = await fetch(url, {
           method: 'GET',
@@ -123,6 +166,7 @@ export async function fetchFromGoogleSheets(): Promise<{
           const directJson = await res.json();
           if (directJson && directJson.status === 'success') {
             data = directJson;
+            fetchedDirectlyFromAppsScript = true;
           }
         }
       } catch {
@@ -171,15 +215,39 @@ export async function fetchFromGoogleSheets(): Promise<{
 
       let normalizedSettings = data.settings;
       if (data.settings && typeof data.settings === 'object') {
+        const sanitized = sanitizeSheetSettings(data.settings);
+        const hadFormulaError = sanitized._hadFormulaError;
+        delete sanitized._hadFormulaError;
+
         normalizedSettings = {
-          ...data.settings,
-          logoUrl: normalizeGoogleDriveImageUrl(data.settings.logoUrl) || data.settings.logoUrl || '',
-          qrisUrl: normalizeGoogleDriveImageUrl(data.settings.qrisUrl) || data.settings.qrisUrl || '',
-          promos: Array.isArray(data.settings.promos)
-            ? data.settings.promos.map((pr: string) => normalizeGoogleDriveImageUrl(pr) || pr)
+          ...sanitized,
+          logoUrl: normalizeGoogleDriveImageUrl(sanitized.logoUrl) || sanitized.logoUrl || '',
+          qrisUrl: normalizeGoogleDriveImageUrl(sanitized.qrisUrl) || sanitized.qrisUrl || '',
+          promos: Array.isArray(sanitized.promos)
+            ? sanitized.promos.map((pr: string) => normalizeGoogleDriveImageUrl(pr) || pr)
             : [],
         };
         saveLocalSettings(normalizedSettings);
+
+        // If the Google Sheet had "#ERROR!" in phoneNumber, automatically repair the sheet cell!
+        if (hadFormulaError && fetchedDirectlyFromAppsScript) {
+          syncToGoogleSheets('update_settings', normalizedSettings).catch(() => {});
+        }
+      }
+
+      // If this client fetched directly from Google Apps Script, mirror the fresh data and Web App URL
+      // to the server so ALL other browser windows and devices immediately display the exact same settings & data!
+      if (fetchedDirectlyFromAppsScript) {
+        fetch('/api/sheets/mirror', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            webAppUrl: url,
+            settings: normalizedSettings,
+            customers: normalizedCustomers,
+            tickets: data.tickets,
+          }),
+        }).catch(() => {});
       }
 
       return {
@@ -195,7 +263,7 @@ export async function fetchFromGoogleSheets(): Promise<{
 }
 
 export const DEFAULT_COMPANY_SETTINGS = {
-  name: 'Patas Net WiFi',
+  name: 'PATAS NET',
   legalName: 'PT. AMANUSA TELEMEDIA',
   tagline: 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
   address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
@@ -221,7 +289,9 @@ export function getLocalSettings(): typeof DEFAULT_COMPANY_SETTINGS {
   try {
     const raw = localStorage.getItem(STORAGE_SETTINGS_KEY);
     if (raw) {
-      return { ...DEFAULT_COMPANY_SETTINGS, ...JSON.parse(raw) };
+      const sanitized = sanitizeSheetSettings({ ...DEFAULT_COMPANY_SETTINGS, ...JSON.parse(raw) });
+      delete sanitized._hadFormulaError;
+      return sanitized;
     }
   } catch {
     // ignore
@@ -232,7 +302,8 @@ export function getLocalSettings(): typeof DEFAULT_COMPANY_SETTINGS {
 export function saveLocalSettings(settings: Partial<typeof DEFAULT_COMPANY_SETTINGS>): void {
   try {
     const current = getLocalSettings();
-    const cleaned = { ...settings };
+    const cleaned = sanitizeSheetSettings({ ...settings });
+    delete cleaned._hadFormulaError;
     // Never overwrite an existing valid logo/qris with an empty string or undefined
     if ((!cleaned.logoUrl || cleaned.logoUrl.trim() === '') && current.logoUrl && current.logoUrl.trim() !== '') {
       cleaned.logoUrl = current.logoUrl;

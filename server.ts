@@ -35,6 +35,7 @@ import {
   syncSheetsWebhook,
   fetchFromGoogleSheetsServer,
   getGoogleSheetsDatabase,
+  mirrorExternalSheetsDataToServer,
 } from './src/lib/serverSheets.ts';
 import { GOOGLE_APPS_SCRIPT_TEMPLATE } from './src/lib/googleSheetsIntegration.ts';
 
@@ -572,6 +573,7 @@ app.post('/api/settings/company', async (req, res) => {
       logoText,
       themeColor,
       logoUrl,
+      promos,
       legalName,
       tagline,
       coverageText,
@@ -594,6 +596,7 @@ app.post('/api/settings/company', async (req, res) => {
       logoText,
       themeColor,
       logoUrl,
+      promos,
       legalName,
       tagline,
       coverageText,
@@ -1164,14 +1167,8 @@ app.post('/api/dev/sheets/sync-up', async (req, res) => {
       settings,
     });
 
-    // Also update settings in spreadsheet
-    await syncSheetsWebhook('update_settings', {
-      name: settings.name,
-      address: settings.address,
-      logoText: settings.logoText,
-      themeColor: settings.themeColor,
-      logoUrl: settings.logoUrl,
-    });
+    // Also update all settings fields in spreadsheet
+    await syncSheetsWebhook('update_settings', settings);
 
     saveSheetsConfig({ lastSyncedAt: new Date().toISOString() });
 
@@ -1191,28 +1188,18 @@ app.get(['/api/dev/sheets/sync-down', '/api/sheets/sync-down', '/api/sheets/fetc
   try {
     const data = await fetchFromGoogleSheetsServer();
 
-    // If settings found, sync server settings
-    if (data.settings && data.settings.name) {
-      await updateCompanySettings({
-        name: data.settings.name,
-        address: data.settings.address || '',
-        logoText: data.settings.logoText || 'PATAS NET',
-        themeColor: data.settings.themeColor || '#2563eb',
-        logoUrl: data.settings.logoUrl || '',
-        tagline: data.settings.tagline || undefined,
-        coverageText: data.settings.coverageText || undefined,
-        legalName: data.settings.legalName || undefined,
-        whatsappNumber: data.settings.whatsappNumber || undefined,
-        phoneNumber: data.settings.phoneNumber || undefined,
-        email: data.settings.email || undefined,
-        qrisUrl: data.settings.qrisUrl || undefined,
-      });
+    // If external Google Sheets returned updated settings, persist and broadcast to all devices
+    if (data.source === 'external_google_sheets' && data.settings && data.settings.name) {
+      const updatedSettings = await updateCompanySettings(data.settings);
+      data.settings = updatedSettings;
+      broadcastServerSync({ type: 'SETTINGS_UPDATED', settings: updatedSettings });
     }
 
     saveSheetsConfig({ lastSyncedAt: new Date().toISOString() });
 
     return res.json({
       status: 'success',
+      source: data.source,
       customers: data.customers || [],
       tickets: data.tickets || [],
       settings: data.settings,
@@ -1220,6 +1207,38 @@ app.get(['/api/dev/sheets/sync-down', '/api/sheets/sync-down', '/api/sheets/fetc
     });
   } catch (err: any) {
     console.error('Google Sheets sync-down error:', err);
+    return res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// Mirror endpoint: when any client browser fetches directly from its Google Apps Script Web App,
+// it mirrors the live settings/customers/tickets and Web App URL to the server so all other devices
+// immediately display the exact same data!
+app.post('/api/sheets/mirror', async (req, res) => {
+  try {
+    const { webAppUrl, settings, customers, tickets } = req.body || {};
+    const mirrored = mirrorExternalSheetsDataToServer({
+      webAppUrl,
+      settings,
+      customers,
+      tickets,
+    });
+
+    if (mirrored.settingsUpdated && mirrored.mergedSettings) {
+      broadcastServerSync({ type: 'SETTINGS_UPDATED', settings: mirrored.mergedSettings });
+    }
+    if (mirrored.dbUpdated) {
+      broadcastServerSync({ type: 'SHEETS_DB_UPDATED', timestamp: Date.now() });
+    }
+
+    return res.json({
+      status: 'success',
+      settingsUpdated: mirrored.settingsUpdated,
+      dbUpdated: mirrored.dbUpdated,
+      settings: mirrored.mergedSettings,
+    });
+  } catch (err: any) {
+    console.error('Sheets mirror error:', err);
     return res.status(500).json({ status: 'error', message: err.message });
   }
 });
@@ -1237,7 +1256,6 @@ app.post('/api/dev/sheets/test-registration', async (req, res) => {
       coordinates: [-6.2088, 106.8456],
       packageId: 'home-20m',
       status: 'pending',
-      // Standard small 1x1 png base64 for testing Drive upload
       ktpImageBase64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEeQHz2fW4AAAAABJRU5ErkJggg==',
       amount: 170000,
     };
@@ -1277,8 +1295,13 @@ app.post('/api/sheets/proxy', async (req, res) => {
   try {
     const { action, url: clientUrl, ...payload } = req.body;
     // Always sync with the internal Google Sheets database and forward if URL exists
-    const result = await syncSheetsWebhook(action, payload);
-    broadcastServerSync({ type: 'SHEETS_DB_UPDATED', action, timestamp: Date.now() });
+    const result = await syncSheetsWebhook(action, payload, clientUrl);
+    if (action === 'update_settings' || action === 'update_logo' || action === 'update_qris') {
+      const updatedSettings = await updateCompanySettings(payload);
+      broadcastServerSync({ type: 'SETTINGS_UPDATED', settings: updatedSettings });
+    } else {
+      broadcastServerSync({ type: 'SHEETS_DB_UPDATED', action, timestamp: Date.now() });
+    }
     return res.json({
       status: 'success',
       message: 'Data berhasil disinkronkan ke Google Sheets Database!',

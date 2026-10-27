@@ -32,6 +32,79 @@ export function normalizeGoogleDriveImageUrl(url?: string | null): string {
 }
 
 /**
+ * Sanitizes settings coming from Google Sheets so formula parse errors
+ * (such as "#ERROR!" when a phone number starts with "+62") are automatically
+ * repaired across all devices.
+ */
+export function sanitizeSheetSettings<T extends Record<string, any>>(settings: T): T & { _hadFormulaError?: boolean } {
+  if (!settings || typeof settings !== 'object') return settings;
+  const cleaned: Record<string, any> = { ...settings };
+  let hadFormulaError = false;
+
+  const isFormulaError = (val: any): boolean => {
+    if (typeof val !== 'string') return false;
+    const upper = val.trim().toUpperCase();
+    return (
+      upper === '#ERROR!' ||
+      upper === '#VALUE!' ||
+      upper === '#NAME?' ||
+      upper === '#REF!' ||
+      upper === '#N/A' ||
+      upper === '#NUM!' ||
+      upper === 'ERROR'
+    );
+  };
+
+  const defaults: Record<string, string> = {
+    name: 'PATAS NET',
+    legalName: 'PT. AMANUSA TELEMEDIA',
+    tagline: 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
+    coverageText: '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
+    whatsappNumber: '0812-3456-7890',
+    phoneNumber: '+62 899-3299-977',
+    email: 'cs@patasnet.id',
+    address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
+    logoText: 'PATAS NET',
+    themeColor: '#2563eb',
+  };
+
+  for (const key of Object.keys(cleaned)) {
+    const val = cleaned[key];
+    if (typeof val === 'string') {
+      if (isFormulaError(val)) {
+        cleaned[key] = defaults[key] || '';
+        hadFormulaError = true;
+      } else if (val.startsWith("'+") || val.startsWith("'=")) {
+        cleaned[key] = val.substring(1);
+      }
+    }
+  }
+
+  if (hadFormulaError) {
+    cleaned._hadFormulaError = true;
+  }
+
+  return cleaned as T & { _hadFormulaError?: boolean };
+}
+
+/**
+ * Checks whether a URL is a valid deployed Google Apps Script Web App URL.
+ */
+export function isAppsScriptWebAppUrl(url?: string | null): boolean {
+  if (!url || typeof url !== 'string') return false;
+  return url.trim().startsWith('https://script.google.com/macros/s/');
+}
+
+/**
+ * Extracts a Google Spreadsheet ID if the user pasted a docs.google.com/spreadsheets/d/<ID> link.
+ */
+export function extractSpreadsheetId(url?: string | null): string | null {
+  if (!url || typeof url !== 'string') return null;
+  const match = url.match(/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  return match && match[1] ? match[1] : null;
+}
+
+/**
  * Returns the default Google Sheets Web App URL from Vite Environment Variables
  * (for Vercel deployment) or data/sheets_config.json.
  */
@@ -99,6 +172,7 @@ function setupDatabaseOtomatis() {
       "Alamat Lengkap", "Koordinat GPS", "Paket WiFi", "Status", "URL Foto KTP Drive", "PasswordHash"
     ]);
     sheetPelanggan.getRange("A1:K1").setFontWeight("bold").setBackground("#2563eb").setFontColor("#ffffff");
+    sheetPelanggan.getRange("E:E").setNumberFormat("@");
     sheetPelanggan.setFrozenRows(1);
 
     // Data awal contoh (otomatis terisi saat pertama kali dibuat)
@@ -149,6 +223,7 @@ function setupDatabaseOtomatis() {
       "Timestamp", "ID Tiket", "ID Pelanggan", "Nama", "Nomor WA", "Pesan Masalah", "Status"
     ]);
     sheetTiket.getRange("A1:G1").setFontWeight("bold").setBackground("#f59e0b").setFontColor("#ffffff");
+    sheetTiket.getRange("E:E").setNumberFormat("@");
     sheetTiket.setFrozenRows(1);
 
     sheetTiket.appendRow([
@@ -162,13 +237,14 @@ function setupDatabaseOtomatis() {
   if (!sheetPengaturan) {
     sheetPengaturan = ss.insertSheet("Pengaturan");
   }
+  sheetPengaturan.getRange("B:B").setNumberFormat("@");
   if (sheetPengaturan.getLastRow() === 0) {
     sheetPengaturan.appendRow(["Key", "Value", "UpdatedAt"]);
     sheetPengaturan.getRange("A1:C1").setFontWeight("bold").setBackground("#6366f1").setFontColor("#ffffff");
     sheetPengaturan.setFrozenRows(1);
 
     var defaultSettings = [
-      ["name", "Patas Net WiFi", new Date()],
+      ["name", "PATAS NET", new Date()],
       ["logoText", "PATAS NET", new Date()],
       ["logoUrl", "", new Date()],
       ["qrisUrl", "", new Date()],
@@ -182,7 +258,7 @@ function setupDatabaseOtomatis() {
       ["coverageText", "5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan", new Date()],
       ["legalName", "PT. AMANUSA TELEMEDIA", new Date()],
       ["whatsappNumber", "0812-3456-7890", new Date()],
-      ["phoneNumber", "+62 899-3299-977", new Date()],
+      ["phoneNumber", "'+62 899-3299-977", new Date()],
       ["email", "cs@patasnet.id", new Date()],
       ["instagramUrl", "https://instagram.com/patasnet.id", new Date()],
       ["facebookUrl", "https://facebook.com/patasnet.id", new Date()],
@@ -191,6 +267,17 @@ function setupDatabaseOtomatis() {
     ];
     for (var s = 0; s < defaultSettings.length; s++) {
       sheetPengaturan.appendRow(defaultSettings[s]);
+    }
+  } else {
+    // Perbaiki otomatis jika ada baris phoneNumber yang terkena #ERROR! akibat tanda +
+    var existingPeng = sheetPengaturan.getDataRange().getValues();
+    for (var ep = 1; ep < existingPeng.length; ep++) {
+      var kName = String(existingPeng[ep][0]).trim();
+      var kVal = String(existingPeng[ep][1] || "").trim();
+      if (kVal === "#ERROR!" || kVal === "#VALUE!" || kVal === "#NAME?") {
+        var fixedVal = kName === "phoneNumber" ? "+62 899-3299-977" : (kName === "whatsappNumber" ? "0812-3456-7890" : "");
+        sheetPengaturan.getRange(ep + 1, 2).setNumberFormat("@").setValue(fixedVal);
+      }
     }
   }
 
@@ -411,19 +498,27 @@ function doGet(e) {
     }
 
     var settings = {
-      name: "Patas Net WiFi",
+      name: "PATAS NET",
       logoText: "PATAS NET",
       logoUrl: "",
       qrisUrl: "",
       promos: [],
       address: "Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110",
-      themeColor: "#2563eb"
+      themeColor: "#2563eb",
+      phoneNumber: "+62 899-3299-977",
+      whatsappNumber: "0812-3456-7890"
     };
     if (sheetPengaturan && sheetPengaturan.getLastRow() > 1) {
       var sData = sheetPengaturan.getDataRange().getValues();
       for (var s = 1; s < sData.length; s++) {
         var key = String(sData[s][0]).trim();
         var val = String(sData[s][1] || "");
+        if (val === "#ERROR!" || val === "#VALUE!" || val === "#NAME?") {
+          val = key === "phoneNumber" ? "+62 899-3299-977" : (key === "whatsappNumber" ? "0812-3456-7890" : "");
+          try {
+            sheetPengaturan.getRange(s + 1, 2).setNumberFormat("@").setValue(val);
+          } catch (e) {}
+        }
         if (key) {
           if (key === "qrisAutoVerify") {
             settings[key] = (val === "true" || val === "TRUE" || val === "1");
@@ -523,12 +618,16 @@ function doPost(e) {
       }
 
       var newCustId = payload.id || ("TR-" + Math.floor(1000 + Math.random() * 9000));
+      var safePhone = String(payload.phone || "");
+      if (safePhone.indexOf("+") === 0 || safePhone.indexOf("=") === 0) {
+        safePhone = "'" + safePhone;
+      }
       sheet.appendRow([
         new Date(),
         newCustId,
         payload.name || "",
         payload.email || "",
-        payload.phone || "",
+        safePhone,
         payload.address || "",
         Array.isArray(payload.coordinates) ? payload.coordinates.join(", ") : (payload.coordinates || "-6.2088, 106.8456"),
         payload.packageId || "home-20m",
@@ -665,12 +764,16 @@ function doPost(e) {
 
     if (action === "create_ticket") {
       var sheetTik = ss.getSheetByName("Tiket");
+      var safeTPhone = String(payload.phone || "");
+      if (safeTPhone.indexOf("+") === 0 || safeTPhone.indexOf("=") === 0) {
+        safeTPhone = "'" + safeTPhone;
+      }
       sheetTik.appendRow([
         new Date(),
         payload.id || ("TCK-" + Math.floor(1000 + Math.random() * 9000)),
         payload.userId || "",
         payload.userName || "",
-        payload.phone || "",
+        safeTPhone,
         payload.message || "",
         payload.status || "open"
       ]);
@@ -679,6 +782,7 @@ function doPost(e) {
 
     if (action === "update_settings" || action === "update_logo" || action === "update_qris") {
       var sheetPeng = ss.getSheetByName("Pengaturan");
+      sheetPeng.getRange("B:B").setNumberFormat("@");
       var finalLogoUrl = payload.logoUrl || "";
       var logoData = payload.logoBase64 || (payload.logoUrl && String(payload.logoUrl).indexOf("data:") === 0 ? payload.logoUrl : "");
       if (logoData) {
@@ -734,17 +838,21 @@ function doPost(e) {
 
       for (var key in keysToUpdate) {
         if (keysToUpdate[key] !== undefined && keysToUpdate[key] !== null && String(keysToUpdate[key]).trim() !== "") {
+          var strVal = String(keysToUpdate[key]);
           var found = false;
           for (var r = 1; r < sData.length; r++) {
             if (String(sData[r][0]).trim() === key) {
-              sheetPeng.getRange(r + 1, 2).setValue(keysToUpdate[key]);
+              var cell = sheetPeng.getRange(r + 1, 2);
+              cell.setNumberFormat("@");
+              cell.setValue(strVal);
               sheetPeng.getRange(r + 1, 3).setValue(new Date());
               found = true;
               break;
             }
           }
           if (!found) {
-            sheetPeng.appendRow([key, keysToUpdate[key], new Date()]);
+            var safeAppendVal = (strVal.indexOf("+") === 0 || strVal.indexOf("=") === 0) ? ("'" + strVal) : strVal;
+            sheetPeng.appendRow([key, safeAppendVal, new Date()]);
           }
         }
       }
@@ -772,12 +880,14 @@ function doPost(e) {
             if (ktpDrive && String(ktpDrive).indexOf("data:") === 0) {
               ktpDrive = saveBase64ToDrive(ktpDrive, "KTP_" + (c.name || "user") + "_" + c.id + ".jpg", "KTP_Pelanggan");
             }
+            var cPhone = String(c.phone || "");
+            if (cPhone.indexOf("+") === 0 || cPhone.indexOf("=") === 0) cPhone = "'" + cPhone;
             sheetPel.appendRow([
               new Date(c.createdAt || Date.now()),
               c.id,
               c.name,
               c.email,
-              c.phone,
+              cPhone,
               c.address,
               Array.isArray(c.coordinates) ? c.coordinates.join(", ") : "",
               c.packageId,

@@ -28,7 +28,53 @@ import {
   requestPasswordResetLocally,
   resetCustomerPasswordLocally,
 } from './lib/clientFallback';
+import { sanitizeSheetSettings, isAppsScriptWebAppUrl } from './lib/googleSheetsIntegration';
 
+function mergeIncomingSettings(prev: CompanySettings, incoming: Partial<CompanySettings>): CompanySettings {
+  const sanitized = sanitizeSheetSettings({ ...incoming });
+  delete (sanitized as any)._hadFormulaError;
+  return {
+    ...prev,
+    ...sanitized,
+    logoUrl: sanitized.logoUrl && String(sanitized.logoUrl).trim() !== '' ? sanitized.logoUrl : prev.logoUrl,
+    qrisUrl: sanitized.qrisUrl && String(sanitized.qrisUrl).trim() !== '' ? sanitized.qrisUrl : prev.qrisUrl,
+    promos:
+      Array.isArray(sanitized.promos) && sanitized.promos.length > 0
+        ? sanitized.promos
+        : Array.isArray(prev.promos)
+        ? prev.promos
+        : [],
+  };
+}
+
+function haveSettingsChanged(a: CompanySettings, b: CompanySettings): boolean {
+  const keys: Array<keyof CompanySettings> = [
+    'name',
+    'legalName',
+    'tagline',
+    'coverageText',
+    'whatsappNumber',
+    'phoneNumber',
+    'email',
+    'address',
+    'logoText',
+    'themeColor',
+    'logoUrl',
+    'qrisUrl',
+    'qrisMerchantName',
+    'qrisNmid',
+    'qrisAutoVerify',
+    'qrisInstructions',
+    'instagramUrl',
+    'facebookUrl',
+    'youtubeUrl',
+  ];
+  for (const k of keys) {
+    if ((a[k] ?? '') !== (b[k] ?? '')) return true;
+  }
+  if (JSON.stringify(a.promos || []) !== JSON.stringify(b.promos || [])) return true;
+  return false;
+}
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<string>('home');
@@ -78,34 +124,38 @@ export default function App() {
     // 1. Initial immediate paint from local storage
     const local = getLocalSettings();
     if (local && (local.logoUrl || local.name)) {
-      setCompanySettings((prev) => ({ ...prev, ...local }));
+      setCompanySettings((prev) => mergeIncomingSettings(prev, local));
     }
 
-    // 2. Fetch shared Google Sheets configuration from server
+    // 2. Synchronize Google Sheets Web App URL between client and server so all devices share the same URL
     try {
+      const localUrl = getGoogleSheetsWebhookUrl();
       const cfgRes = await fetch('/api/sheets/config');
       if (cfgRes.ok) {
         const cJson = await cfgRes.json();
-        if (cJson?.config?.webAppUrl) {
-          saveGoogleSheetsWebhookUrl(cJson.config.webAppUrl);
+        const serverUrl = cJson?.config?.webAppUrl || '';
+        if (isAppsScriptWebAppUrl(localUrl) && !isAppsScriptWebAppUrl(serverUrl)) {
+          // Push this browser's valid Apps Script URL to the server so all other devices get it
+          fetch('/api/sheets/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ webAppUrl: localUrl }),
+          }).catch(() => {});
+        } else if (serverUrl) {
+          saveGoogleSheetsWebhookUrl(serverUrl);
         }
       }
     } catch {}
 
-    // 3. Fetch from server company settings
+    // 3. Fetch authoritative company settings from server
     try {
       const response = await fetch('/api/settings/company');
       if (response.ok) {
         const data = await response.json();
         const settings = data.settings || data;
-        if (settings) {
+        if (settings && typeof settings === 'object') {
           setCompanySettings((prev) => {
-            const merged = {
-              ...prev,
-              ...settings,
-              logoUrl: (settings.logoUrl && settings.logoUrl.trim() !== '') ? settings.logoUrl : prev.logoUrl,
-              qrisUrl: (settings.qrisUrl && settings.qrisUrl.trim() !== '') ? settings.qrisUrl : prev.qrisUrl,
-            };
+            const merged = mergeIncomingSettings(prev, settings);
             saveLocalSettings(merged);
             return merged;
           });
@@ -115,17 +165,12 @@ export default function App() {
       console.warn('Failed to fetch company settings:', err);
     }
 
-    // 4. Also check Google Sheets directly (preserving custom logo and QRIS)
+    // 4. Also check Google Sheets directly (and mirror back to server if updated)
     try {
       const sheetData = await fetchFromGoogleSheets();
       if (sheetData && sheetData.settings) {
         setCompanySettings((prev) => {
-          const merged = {
-            ...prev,
-            ...sheetData.settings,
-            logoUrl: (sheetData.settings.logoUrl && sheetData.settings.logoUrl.trim() !== '') ? sheetData.settings.logoUrl : prev.logoUrl,
-            qrisUrl: (sheetData.settings.qrisUrl && sheetData.settings.qrisUrl.trim() !== '') ? sheetData.settings.qrisUrl : prev.qrisUrl,
-          };
+          const merged = mergeIncomingSettings(prev, sheetData.settings);
           saveLocalSettings(merged);
           return merged;
         });
@@ -136,7 +181,7 @@ export default function App() {
   };
 
   const handleUpdateCompanySettings = async (newSettings: Partial<CompanySettings> & { name: string }) => {
-    const updated = { ...companySettings, ...newSettings };
+    const updated = mergeIncomingSettings(companySettings, newSettings);
     // 1. Instantly update local state & local storage for immediate UI reactivity everywhere
     setCompanySettings(updated);
     saveLocalSettings(updated);
@@ -154,16 +199,24 @@ export default function App() {
 
     // 3. Persist to server if available (which updates Google Sheets & Drive and broadcasts via SSE to all other devices)
     try {
-      await fetch('/api/settings/company', {
+      const res = await fetch('/api/settings/company', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updated)
+        body: JSON.stringify(updated),
       });
+      if (res.ok) {
+        const sJson = await res.json();
+        if (sJson?.settings) {
+          const serverMerged = mergeIncomingSettings(updated, sJson.settings);
+          setCompanySettings(serverMerged);
+          saveLocalSettings(serverMerged);
+        }
+      }
     } catch (err) {
       console.warn('Failed to update company settings on server:', err);
     }
 
-    // 5. Sync to Google Sheets & Drive Webhook in 2-way real time
+    // 4. Sync to Google Sheets & Drive Webhook in 2-way real time
     try {
       await syncToGoogleSheets('update_settings', {
         ...updated,
@@ -186,12 +239,11 @@ export default function App() {
         bc = new BroadcastChannel('patasnet_sync');
         bc.onmessage = (event) => {
           if (event.data?.type === 'SETTINGS_UPDATED' && event.data.settings) {
-            setCompanySettings((prev) => ({
-              ...prev,
-              ...event.data.settings,
-              logoUrl: event.data.settings.logoUrl || prev.logoUrl,
-              qrisUrl: event.data.settings.qrisUrl || prev.qrisUrl,
-            }));
+            setCompanySettings((prev) => {
+              const merged = mergeIncomingSettings(prev, event.data.settings);
+              saveLocalSettings(merged);
+              return merged;
+            });
           }
         };
       }
@@ -206,12 +258,7 @@ export default function App() {
           const data = JSON.parse(event.data);
           if (data.type === 'SETTINGS_UPDATED' && data.settings) {
             setCompanySettings((prev) => {
-              const merged = {
-                ...prev,
-                ...data.settings,
-                logoUrl: data.settings.logoUrl || prev.logoUrl,
-                qrisUrl: data.settings.qrisUrl || prev.qrisUrl,
-              };
+              const merged = mergeIncomingSettings(prev, data.settings);
               saveLocalSettings(merged);
               return merged;
             });
@@ -235,12 +282,7 @@ export default function App() {
                   }
                   if (sheetData.settings && sheetData.settings.name) {
                     setCompanySettings((prev) => {
-                      const merged = {
-                        ...prev,
-                        ...sheetData.settings,
-                        logoUrl: sheetData.settings.logoUrl || prev.logoUrl,
-                        qrisUrl: sheetData.settings.qrisUrl || prev.qrisUrl,
-                      };
+                      const merged = mergeIncomingSettings(prev, sheetData.settings);
                       saveLocalSettings(merged);
                       return merged;
                     });
@@ -256,46 +298,38 @@ export default function App() {
     // 3. Initial sync down from Google Sheets & Drive
     fetchAdminData();
 
-    // 4. Continuous background synchronization with Google Sheets & Drive every 4 seconds
+    // 4. Continuous background synchronization with Google Sheets & Drive every 3 seconds
     const bgSyncInterval = setInterval(() => {
-      fetchFromGoogleSheets().then((data) => {
-        if (data) {
-          if (data.customers && data.customers.length > 0) {
-            setAdminCustomers(data.customers);
-            setCurrentUser((curr) => {
-              if (curr && 'id' in curr) {
-                const updated = data.customers?.find((c) => c.id === curr.id);
-                if (updated) return updated;
-              }
-              return curr;
-            });
+      fetchFromGoogleSheets()
+        .then((data) => {
+          if (data) {
+            if (data.customers && data.customers.length > 0) {
+              setAdminCustomers(data.customers);
+              setCurrentUser((curr) => {
+                if (curr && 'id' in curr) {
+                  const updated = data.customers?.find((c) => c.id === curr.id);
+                  if (updated) return updated;
+                }
+                return curr;
+              });
+            }
+            if (data.tickets && data.tickets.length > 0) {
+              setAdminSupportTickets(data.tickets);
+            }
+            if (data.settings && data.settings.name) {
+              setCompanySettings((prev) => {
+                const merged = mergeIncomingSettings(prev, data.settings);
+                if (haveSettingsChanged(prev, merged)) {
+                  saveLocalSettings(merged);
+                  return merged;
+                }
+                return prev;
+              });
+            }
           }
-          if (data.tickets && data.tickets.length > 0) {
-            setAdminSupportTickets(data.tickets);
-          }
-          if (data.settings && data.settings.name) {
-            setCompanySettings((prev) => {
-              const hasChange =
-                data.settings.logoUrl !== prev.logoUrl ||
-                data.settings.name !== prev.name ||
-                data.settings.qrisUrl !== prev.qrisUrl ||
-                data.settings.tagline !== prev.tagline;
-              if (hasChange) {
-                const merged = {
-                  ...prev,
-                  ...data.settings,
-                  logoUrl: data.settings.logoUrl || prev.logoUrl,
-                  qrisUrl: data.settings.qrisUrl || prev.qrisUrl,
-                };
-                saveLocalSettings(merged);
-                return merged;
-              }
-              return prev;
-            });
-          }
-        }
-      }).catch(() => {});
-    }, 4000);
+        })
+        .catch(() => {});
+    }, 3000);
 
     return () => {
       if (bc) bc.close();
@@ -318,12 +352,11 @@ export default function App() {
         setAdminCustomers(sheetData.customers);
         if (sheetData.tickets) setAdminSupportTickets(sheetData.tickets);
         if (sheetData.settings && sheetData.settings.name) {
-          setCompanySettings((prev) => ({
-            ...prev,
-            ...sheetData.settings,
-            logoUrl: sheetData.settings.logoUrl || prev.logoUrl,
-            qrisUrl: sheetData.settings.qrisUrl || prev.qrisUrl,
-          }));
+          setCompanySettings((prev) => {
+            const merged = mergeIncomingSettings(prev, sheetData.settings);
+            saveLocalSettings(merged);
+            return merged;
+          });
         }
         return;
       }
@@ -339,6 +372,13 @@ export default function App() {
         setAdminCustomers(data.customers || []);
         setAdminSupportTickets(data.tickets || []);
         setAdminWhatsappLogs(data.whatsappLogs || []);
+        if (data.companySettings) {
+          setCompanySettings((prev) => {
+            const merged = mergeIncomingSettings(prev, data.companySettings);
+            saveLocalSettings(merged);
+            return merged;
+          });
+        }
         return;
       }
     } catch (err) {
@@ -386,7 +426,7 @@ export default function App() {
     }
   };
 
-  // Real-time 2-way synchronizer: polling every 3 seconds to sync with Google Sheets as primary database
+  // Real-time 2-way synchronizer: polling every 3 seconds to sync with Google Sheets & server across all devices
   useEffect(() => {
     const runLiveSync = async () => {
       // 1. Live 2-way sync with Google Sheets as Primary Database
@@ -394,7 +434,14 @@ export default function App() {
         const sheetData = await fetchFromGoogleSheets();
         if (sheetData) {
           if (sheetData.settings && sheetData.settings.name) {
-            setCompanySettings((prev) => ({ ...prev, ...sheetData.settings }));
+            setCompanySettings((prev) => {
+              const merged = mergeIncomingSettings(prev, sheetData.settings);
+              if (haveSettingsChanged(prev, merged)) {
+                saveLocalSettings(merged);
+                return merged;
+              }
+              return prev;
+            });
           }
           if (sheetData.customers && sheetData.customers.length > 0) {
             setAdminCustomers(sheetData.customers);
@@ -414,14 +461,21 @@ export default function App() {
         // silent
       }
 
-      // 2. Silent sync for server company settings
+      // 2. Silent sync for server company settings across all fields
       fetch('/api/settings/company')
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
           if (data) {
             const s = data.settings || data;
-            if (s && (s.logoUrl !== companySettings.logoUrl || s.name !== companySettings.name || s.coverageText !== companySettings.coverageText)) {
-              setCompanySettings((prev) => ({ ...prev, ...s }));
+            if (s && typeof s === 'object' && s.name) {
+              setCompanySettings((prev) => {
+                const merged = mergeIncomingSettings(prev, s);
+                if (haveSettingsChanged(prev, merged)) {
+                  saveLocalSettings(merged);
+                  return merged;
+                }
+                return prev;
+              });
             }
           }
         })
@@ -461,7 +515,7 @@ export default function App() {
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [currentUser, companySettings.logoUrl, companySettings.name]);
+  }, [currentUser]);
 
   // Sync active dashboard states
   useEffect(() => {

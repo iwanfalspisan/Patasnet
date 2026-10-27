@@ -1,9 +1,15 @@
 import fs from 'fs';
 import path from 'path';
-import { normalizeGoogleDriveImageUrl } from './googleSheetsIntegration.ts';
+import {
+  normalizeGoogleDriveImageUrl,
+  sanitizeSheetSettings,
+  isAppsScriptWebAppUrl,
+  extractSpreadsheetId,
+} from './googleSheetsIntegration.ts';
 
 export interface ServerSheetsConfig {
   webAppUrl: string;
+  spreadsheetUrl?: string;
   driveFolderName: string;
   autoSync: boolean;
   syncIntervalSeconds: number;
@@ -29,6 +35,7 @@ export interface GoogleSheetsDatabase {
 
 const SHEETS_CONFIG_PATH = path.resolve(process.cwd(), 'data/sheets_config.json');
 const SHEETS_DB_PATH = path.resolve(process.cwd(), 'data/google_sheets_database.json');
+const COMPANY_SETTINGS_PATH = path.resolve(process.cwd(), 'data/company_settings.json');
 const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
 
 function persistBase64ToLocalDriveMirror(base64OrUrl: string | undefined, category: string, prefix: string): string {
@@ -111,6 +118,7 @@ export function loadSheetsConfig(): ServerSheetsConfig {
       const parsed = JSON.parse(raw);
       return {
         webAppUrl: parsed.webAppUrl || process.env.GOOGLE_SHEETS_WEBHOOK_URL || '',
+        spreadsheetUrl: parsed.spreadsheetUrl || '',
         driveFolderName: parsed.driveFolderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || 'PatasNet_Drive',
         autoSync: parsed.autoSync !== undefined ? parsed.autoSync : true,
         syncIntervalSeconds: parsed.syncIntervalSeconds || 3,
@@ -130,10 +138,27 @@ export function loadSheetsConfig(): ServerSheetsConfig {
 
 export function saveSheetsConfig(config: Partial<ServerSheetsConfig>): ServerSheetsConfig {
   const current = loadSheetsConfig();
+  let nextWebAppUrl = config.webAppUrl !== undefined ? config.webAppUrl.trim() : current.webAppUrl;
+  let nextSpreadsheetUrl = config.spreadsheetUrl !== undefined ? config.spreadsheetUrl.trim() : current.spreadsheetUrl;
+
+  // Never accidentally clobber a valid script.google.com/macros/s/.../exec URL with a docs.google.com view link
+  if (
+    isAppsScriptWebAppUrl(current.webAppUrl) &&
+    nextWebAppUrl &&
+    !isAppsScriptWebAppUrl(nextWebAppUrl) &&
+    extractSpreadsheetId(nextWebAppUrl)
+  ) {
+    nextSpreadsheetUrl = nextWebAppUrl;
+    nextWebAppUrl = current.webAppUrl;
+  } else if (nextWebAppUrl && extractSpreadsheetId(nextWebAppUrl)) {
+    nextSpreadsheetUrl = nextWebAppUrl;
+  }
+
   const updated: ServerSheetsConfig = {
     ...current,
     ...config,
-    webAppUrl: (config.webAppUrl !== undefined ? config.webAppUrl : current.webAppUrl).trim(),
+    webAppUrl: nextWebAppUrl,
+    ...(nextSpreadsheetUrl ? { spreadsheetUrl: nextSpreadsheetUrl } : {}),
   };
 
   try {
@@ -336,7 +361,6 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
       db.sheets.Pelanggan.unshift(row);
     }
 
-    // Record initial billing in Pembayaran sheet if not already present for this customer
     const payId = payload.paymentId || `PAY-${Math.floor(7000 + Math.random() * 9000)}`;
     const hasPayment = db.sheets.Pembayaran.some(
       (p) => String(p[1]) === String(payId) || String(p[2]) === String(custId)
@@ -446,12 +470,14 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
       saveGoogleSheetsDatabase(db);
     }
   } else if (action === 'update_settings' || action === 'update_logo' || action === 'update_qris') {
-    const processedPayload = { ...payload };
-    if (processedPayload.logoUrl && String(processedPayload.logoUrl).trim() !== '') {
-      processedPayload.logoUrl = persistBase64ToLocalDriveMirror(processedPayload.logoUrl, 'logos', 'logo_patasnet');
+    const sanitized = sanitizeSheetSettings({ ...payload });
+    delete sanitized._hadFormulaError;
+
+    if (sanitized.logoUrl && String(sanitized.logoUrl).trim() !== '') {
+      sanitized.logoUrl = persistBase64ToLocalDriveMirror(sanitized.logoUrl, 'logos', 'logo_patasnet');
     }
-    if (processedPayload.qrisUrl && String(processedPayload.qrisUrl).trim() !== '') {
-      processedPayload.qrisUrl = persistBase64ToLocalDriveMirror(processedPayload.qrisUrl, 'qris', 'qris_patasnet');
+    if (sanitized.qrisUrl && String(sanitized.qrisUrl).trim() !== '') {
+      sanitized.qrisUrl = persistBase64ToLocalDriveMirror(sanitized.qrisUrl, 'qris', 'qris_patasnet');
     }
 
     const keys = [
@@ -474,23 +500,29 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
       'qrisNmid',
       'qrisAutoVerify',
       'qrisInstructions',
+      'promos',
     ];
     keys.forEach((key) => {
-      if (processedPayload[key] !== undefined && processedPayload[key] !== null) {
-        if ((key === 'logoUrl' || key === 'qrisUrl') && String(processedPayload[key]).trim() === '') {
+      if (sanitized[key] !== undefined && sanitized[key] !== null) {
+        if ((key === 'logoUrl' || key === 'qrisUrl') && String(sanitized[key]).trim() === '') {
           return;
         }
+        const serializedVal =
+          key === 'promos' && Array.isArray(sanitized[key])
+            ? JSON.stringify(sanitized[key])
+            : String(sanitized[key]);
+
         let found = false;
         for (let i = 0; i < db.sheets.Pengaturan.length; i++) {
           if (String(db.sheets.Pengaturan[i][0]) === key) {
-            db.sheets.Pengaturan[i][1] = String(processedPayload[key]);
+            db.sheets.Pengaturan[i][1] = serializedVal;
             db.sheets.Pengaturan[i][2] = nowStr;
             found = true;
             break;
           }
         }
         if (!found) {
-          db.sheets.Pengaturan.push([key, String(processedPayload[key]), nowStr]);
+          db.sheets.Pengaturan.push([key, serializedVal, nowStr]);
         }
       }
     });
@@ -526,8 +558,155 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
   }
 }
 
+/**
+ * Mirrors external Google Sheets data (fetched by server or by any client device)
+ * into the server's company_settings.json and google_sheets_database.json so all
+ * devices immediately share the exact same state.
+ */
+export function mirrorExternalSheetsDataToServer(data: {
+  settings?: any;
+  customers?: any[];
+  tickets?: any[];
+  webAppUrl?: string;
+}): { settingsUpdated: boolean; dbUpdated: boolean; mergedSettings?: any } {
+  let settingsUpdated = false;
+  let dbUpdated = false;
+  let mergedSettings: any = null;
+
+  if (data.webAppUrl && isAppsScriptWebAppUrl(data.webAppUrl)) {
+    saveSheetsConfig({ webAppUrl: data.webAppUrl });
+  }
+
+  const db = getGoogleSheetsDatabase();
+  const nowStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
+  if (data.settings && typeof data.settings === 'object' && Object.keys(data.settings).length > 0) {
+    const sanitized = sanitizeSheetSettings(data.settings);
+    delete sanitized._hadFormulaError;
+
+    let diskSettings: Record<string, any> = {};
+    try {
+      if (fs.existsSync(COMPANY_SETTINGS_PATH)) {
+        diskSettings = JSON.parse(fs.readFileSync(COMPANY_SETTINGS_PATH, 'utf-8'));
+      }
+    } catch {}
+
+    const nextSettings: Record<string, any> = {
+      ...diskSettings,
+      ...sanitized,
+      logoUrl:
+        sanitized.logoUrl && String(sanitized.logoUrl).trim() !== ''
+          ? normalizeGoogleDriveImageUrl(sanitized.logoUrl)
+          : diskSettings.logoUrl || '',
+      qrisUrl:
+        sanitized.qrisUrl && String(sanitized.qrisUrl).trim() !== ''
+          ? normalizeGoogleDriveImageUrl(sanitized.qrisUrl)
+          : diskSettings.qrisUrl || '',
+      promos:
+        Array.isArray(sanitized.promos) && sanitized.promos.length > 0
+          ? sanitized.promos.map((p: string) => normalizeGoogleDriveImageUrl(p))
+          : Array.isArray(diskSettings.promos)
+          ? diskSettings.promos
+          : [],
+    };
+
+    if (JSON.stringify(diskSettings) !== JSON.stringify(nextSettings)) {
+      try {
+        const dir = path.dirname(COMPANY_SETTINGS_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(COMPANY_SETTINGS_PATH, JSON.stringify(nextSettings, null, 2), 'utf-8');
+        settingsUpdated = true;
+      } catch {}
+    }
+
+    // Also update db.sheets.Pengaturan
+    Object.keys(nextSettings).forEach((key) => {
+      if (nextSettings[key] !== undefined && nextSettings[key] !== null) {
+        if ((key === 'logoUrl' || key === 'qrisUrl') && String(nextSettings[key]).trim() === '') return;
+        const valStr =
+          key === 'promos' && Array.isArray(nextSettings[key])
+            ? JSON.stringify(nextSettings[key])
+            : String(nextSettings[key]);
+        let found = false;
+        for (let i = 0; i < db.sheets.Pengaturan.length; i++) {
+          if (String(db.sheets.Pengaturan[i][0]) === key) {
+            if (db.sheets.Pengaturan[i][1] !== valStr) {
+              db.sheets.Pengaturan[i][1] = valStr;
+              db.sheets.Pengaturan[i][2] = nowStr;
+              dbUpdated = true;
+            }
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          db.sheets.Pengaturan.push([key, valStr, nowStr]);
+          dbUpdated = true;
+        }
+      }
+    });
+
+    mergedSettings = nextSettings;
+  }
+
+  if (Array.isArray(data.customers) && data.customers.length > 0) {
+    db.sheets.Pelanggan = data.customers.map((c: any) => [
+      c.createdAt || nowStr,
+      c.id,
+      c.name,
+      c.email,
+      c.phone,
+      c.address,
+      Array.isArray(c.coordinates) ? c.coordinates.join(', ') : c.coordinates || '-6.2088, 106.8456',
+      c.packageId || 'home-20m',
+      c.status || 'active',
+      normalizeGoogleDriveImageUrl(c.ktpImageUrl) || '',
+    ]);
+    const allPays: any[][] = [];
+    data.customers.forEach((c: any) => {
+      (c.payments || []).forEach((p: any) => {
+        allPays.push([
+          p.date || nowStr.substring(0, 10),
+          p.id,
+          c.id,
+          c.name,
+          p.amount || 170000,
+          p.billingPeriod || 'Tagihan Berjalan',
+          p.method || 'Transfer Bank',
+          p.status || 'unpaid',
+          normalizeGoogleDriveImageUrl(p.proofOfPaymentUrl) || '',
+          p.transactionId || '',
+        ]);
+      });
+    });
+    if (allPays.length > 0) {
+      db.sheets.Pembayaran = allPays;
+    }
+    dbUpdated = true;
+  }
+
+  if (Array.isArray(data.tickets) && data.tickets.length > 0) {
+    db.sheets.Tiket = data.tickets.map((t: any) => [
+      t.date || t.createdAt || nowStr,
+      t.id,
+      t.userId || t.customerId || '',
+      t.userName || t.customerName || '',
+      t.phone || t.customerPhone || '',
+      t.message || t.subject || '',
+      t.status || 'open',
+    ]);
+    dbUpdated = true;
+  }
+
+  if (dbUpdated) {
+    saveGoogleSheetsDatabase(db);
+  }
+
+  return { settingsUpdated, dbUpdated, mergedSettings };
+}
+
 // Two-way synchronization: writes to internal Google Sheets DB and forwards to external Google Apps Script Web App
-export async function syncSheetsWebhook(action: string, payload: any): Promise<any> {
+export async function syncSheetsWebhook(action: string, payload: any, customUrl?: string): Promise<any> {
   // 1. Always record into the internal Google Sheets database immediately
   try {
     recordToInternalSheetsDatabase(action, payload);
@@ -535,9 +714,19 @@ export async function syncSheetsWebhook(action: string, payload: any): Promise<a
     console.error('Error recording to internal Google Sheets DB:', err);
   }
 
-  // 2. If external Web App URL is configured, also post to Google Apps Script (Google Sheets + Google Drive)
+  // If the client passed a valid Apps Script Web App URL, save it to server config so all devices share it
+  if (customUrl && isAppsScriptWebAppUrl(customUrl)) {
+    saveSheetsConfig({ webAppUrl: customUrl });
+  }
+
   const cfg = loadSheetsConfig();
-  if (!cfg.webAppUrl) {
+  const targetUrl = isAppsScriptWebAppUrl(customUrl)
+    ? customUrl!
+    : isAppsScriptWebAppUrl(cfg.webAppUrl)
+    ? cfg.webAppUrl
+    : '';
+
+  if (!targetUrl) {
     return {
       status: 'success',
       message: 'Data tersimpan di Google Sheets & Drive Database Server!',
@@ -546,7 +735,7 @@ export async function syncSheetsWebhook(action: string, payload: any): Promise<a
   }
 
   try {
-    const response = await fetch(cfg.webAppUrl, {
+    const response = await fetch(targetUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, ...payload }),
@@ -556,7 +745,6 @@ export async function syncSheetsWebhook(action: string, payload: any): Promise<a
       const text = await response.text();
       try {
         const parsed = JSON.parse(text);
-        // If Google Apps Script uploaded an image to Google Drive and returned its Drive URL, update internal sheet record with the real Google Drive URL!
         if (parsed && parsed.status === 'success') {
           const db = getGoogleSheetsDatabase();
           let updatedDriveLink = false;
@@ -620,98 +808,86 @@ export async function syncSheetsWebhook(action: string, payload: any): Promise<a
   };
 }
 
+/**
+ * Fallback reader when a Google Spreadsheet view URL (docs.google.com/spreadsheets/d/ID)
+ * is provided instead of an Apps Script /exec URL and the sheet is publicly viewable.
+ */
+async function tryFetchFromPublicSpreadsheetGviz(spreadsheetId: string): Promise<any | null> {
+  try {
+    const pengUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json&sheet=Pengaturan`;
+    const res = await fetch(pengUrl, { redirect: 'follow' });
+    if (!res.ok) return null;
+    const text = await res.text();
+    const jsonMatch = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);?/);
+    if (!jsonMatch || !jsonMatch[1]) return null;
+    const parsed = JSON.parse(jsonMatch[1]);
+    const rows = parsed?.table?.rows;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    const settings: Record<string, any> = {};
+    for (const r of rows) {
+      const cells = r?.c;
+      if (Array.isArray(cells) && cells[0]?.v) {
+        const key = String(cells[0].v).trim();
+        const val = cells[1]?.v !== undefined && cells[1]?.v !== null ? String(cells[1].v) : '';
+        if (key && key !== 'Key') {
+          if (key === 'qrisAutoVerify') {
+            settings[key] = val === 'true' || val === 'TRUE' || val === '1';
+          } else if (key === 'promos') {
+            try {
+              settings.promos = JSON.parse(val || '[]');
+            } catch {
+              settings.promos = [];
+            }
+          } else {
+            settings[key] = val;
+          }
+        }
+      }
+    }
+
+    if (Object.keys(settings).length === 0) return null;
+    const sanitized = sanitizeSheetSettings(settings);
+    delete sanitized._hadFormulaError;
+    return {
+      status: 'success',
+      source: 'external_google_sheets',
+      settings: sanitized,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchFromGoogleSheetsServer(): Promise<any> {
   const cfg = loadSheetsConfig();
-  if (cfg.webAppUrl) {
+
+  // 1. Try Apps Script Web App URL if configured
+  if (cfg.webAppUrl && isAppsScriptWebAppUrl(cfg.webAppUrl)) {
     try {
       const response = await fetch(cfg.webAppUrl, {
         method: 'GET',
-        headers: { 'Accept': 'application/json' },
+        headers: { Accept: 'application/json' },
         redirect: 'follow',
       });
       if (response.ok) {
         const data = await response.json();
         if (data && data.status === 'success') {
-          let diskSettings: any = {};
-          try {
-            const csPath = path.resolve(process.cwd(), 'data/company_settings.json');
-            if (fs.existsSync(csPath)) diskSettings = JSON.parse(fs.readFileSync(csPath, 'utf-8'));
-          } catch {}
-          if (!data.settings) data.settings = {};
-          if (data.settings.logoUrl) {
-            data.settings.logoUrl = normalizeGoogleDriveImageUrl(data.settings.logoUrl);
-          } else if (diskSettings.logoUrl) {
-            data.settings.logoUrl = normalizeGoogleDriveImageUrl(diskSettings.logoUrl);
-          }
-          if (data.settings.qrisUrl) {
-            data.settings.qrisUrl = normalizeGoogleDriveImageUrl(data.settings.qrisUrl);
-          } else if (diskSettings.qrisUrl) {
-            data.settings.qrisUrl = normalizeGoogleDriveImageUrl(diskSettings.qrisUrl);
-          }
-
-          if (Array.isArray(data.customers)) {
-            data.customers = data.customers.map((c: any) => ({
-              ...c,
-              ktpImageUrl: normalizeGoogleDriveImageUrl(c.ktpImageUrl),
-              payments: Array.isArray(c.payments)
-                ? c.payments.map((p: any) => ({
-                    ...p,
-                    proofOfPaymentUrl: normalizeGoogleDriveImageUrl(p.proofOfPaymentUrl),
-                  }))
-                : [],
-            }));
-          }
-
-          // Mirror external Google Sheets rows into local google_sheets_database.json so all server endpoints stay in sync
-          try {
-            const db = getGoogleSheetsDatabase();
-            if (Array.isArray(data.customers) && data.customers.length > 0) {
-              db.sheets.Pelanggan = data.customers.map((c: any) => [
-                c.createdAt || new Date().toISOString().replace('T', ' ').substring(0, 19),
-                c.id,
-                c.name,
-                c.email,
-                c.phone,
-                c.address,
-                Array.isArray(c.coordinates) ? c.coordinates.join(', ') : '-6.2088, 106.8456',
-                c.packageId,
-                c.status || 'active',
-                c.ktpImageUrl || '',
-              ]);
-              const allPays: any[][] = [];
-              data.customers.forEach((c: any) => {
-                (c.payments || []).forEach((p: any) => {
-                  allPays.push([
-                    p.date || new Date().toISOString().substring(0, 10),
-                    p.id,
-                    c.id,
-                    c.name,
-                    p.amount || 170000,
-                    p.billingPeriod || 'Tagihan Berjalan',
-                    p.method || 'Transfer Bank',
-                    p.status || 'unpaid',
-                    p.proofOfPaymentUrl || '',
-                  ]);
-                });
-              });
-              if (allPays.length > 0) {
-                db.sheets.Pembayaran = allPays;
-              }
+          if (data.settings) {
+            const sanitized = sanitizeSheetSettings(data.settings);
+            const hadError = sanitized._hadFormulaError;
+            delete sanitized._hadFormulaError;
+            data.settings = sanitized;
+            if (hadError) {
+              // Automatically repair the #ERROR! cell in Google Sheets
+              syncSheetsWebhook('update_settings', sanitized).catch(() => {});
             }
-            if (Array.isArray(data.tickets) && data.tickets.length > 0) {
-              db.sheets.Tiket = data.tickets.map((t: any) => [
-                t.date || t.createdAt || new Date().toISOString().replace('T', ' ').substring(0, 19),
-                t.id,
-                t.userId || t.customerId || '',
-                t.userName || t.customerName || '',
-                t.phone || t.customerPhone || '',
-                t.message || t.subject || '',
-                t.status || 'open',
-              ]);
-            }
-            saveGoogleSheetsDatabase(db);
-          } catch {}
-
+          }
+          const mirrored = mirrorExternalSheetsDataToServer(data);
+          if (mirrored.mergedSettings) {
+            data.settings = mirrored.mergedSettings;
+          }
+          data.source = 'external_google_sheets';
           return data;
         }
       }
@@ -720,7 +896,16 @@ export async function fetchFromGoogleSheetsServer(): Promise<any> {
     }
   }
 
-  // Return live internal Google Sheets database format
+  // 2. If a docs.google.com/spreadsheets/d/ID link is configured, try public Gviz JSON reader
+  const sheetId = extractSpreadsheetId(cfg.webAppUrl) || extractSpreadsheetId(cfg.spreadsheetUrl);
+  if (sheetId) {
+    const gvizData = await tryFetchFromPublicSpreadsheetGviz(sheetId);
+    if (gvizData && gvizData.settings) {
+      mirrorExternalSheetsDataToServer(gvizData);
+    }
+  }
+
+  // 3. Return live internal Google Sheets database format (synced across all devices via server)
   const db = getGoogleSheetsDatabase();
   const customers = db.sheets.Pelanggan.map((row) => ({
     id: String(row[1]),
@@ -760,36 +945,53 @@ export async function fetchFromGoogleSheetsServer(): Promise<any> {
 
   let diskCompanySettings: any = {};
   try {
-    const csPath = path.resolve(process.cwd(), 'data/company_settings.json');
-    if (fs.existsSync(csPath)) {
-      diskCompanySettings = JSON.parse(fs.readFileSync(csPath, 'utf-8'));
+    if (fs.existsSync(COMPANY_SETTINGS_PATH)) {
+      diskCompanySettings = JSON.parse(fs.readFileSync(COMPANY_SETTINGS_PATH, 'utf-8'));
     }
   } catch {}
 
   const settingsObj: Record<string, any> = { ...diskCompanySettings };
   db.sheets.Pengaturan.forEach((row) => {
     if (row[1] !== undefined && row[1] !== null && String(row[1]).trim() !== '') {
-      if (row[0] === 'qrisAutoVerify') {
-        settingsObj[row[0]] = String(row[1]) === 'true' || row[1] === true;
+      const k = String(row[0]);
+      if (k === 'qrisAutoVerify') {
+        settingsObj[k] = String(row[1]) === 'true' || row[1] === true;
+      } else if (k === 'promos') {
+        try {
+          const parsedPromos = typeof row[1] === 'string' ? JSON.parse(row[1]) : row[1];
+          if (Array.isArray(parsedPromos) && parsedPromos.length > 0) {
+            settingsObj.promos = parsedPromos;
+          }
+        } catch {}
       } else {
-        settingsObj[row[0]] = row[1];
+        settingsObj[k] = row[1];
       }
     }
   });
 
-  if (settingsObj.logoUrl) {
-    settingsObj.logoUrl = normalizeGoogleDriveImageUrl(settingsObj.logoUrl);
+  // Ensure diskCompanySettings (most recently saved via API) takes priority for fields present in it
+  Object.keys(diskCompanySettings).forEach((k) => {
+    if (diskCompanySettings[k] !== undefined && diskCompanySettings[k] !== null && String(diskCompanySettings[k]).trim() !== '') {
+      settingsObj[k] = diskCompanySettings[k];
+    }
+  });
+
+  const cleanSettings = sanitizeSheetSettings(settingsObj);
+  delete cleanSettings._hadFormulaError;
+
+  if (cleanSettings.logoUrl) {
+    cleanSettings.logoUrl = normalizeGoogleDriveImageUrl(cleanSettings.logoUrl);
   }
-  if (settingsObj.qrisUrl) {
-    settingsObj.qrisUrl = normalizeGoogleDriveImageUrl(settingsObj.qrisUrl);
+  if (cleanSettings.qrisUrl) {
+    cleanSettings.qrisUrl = normalizeGoogleDriveImageUrl(cleanSettings.qrisUrl);
   }
 
   return {
     status: 'success',
-    source: cfg.webAppUrl ? 'external_google_sheets' : 'internal_google_sheets',
+    source: 'internal_google_sheets',
     customers,
     tickets,
-    settings: settingsObj,
+    settings: cleanSettings,
     sheets: db.sheets,
     headers: db.headers,
   };
