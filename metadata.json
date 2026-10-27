@@ -1,0 +1,10 @@
+{
+  "name": "Patasnet",
+  "description": "Secure WiFi installation platform featuring automated billing, WhatsApp alerts, real-time analytics, and map-based subscription management for seamless service delivery.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
