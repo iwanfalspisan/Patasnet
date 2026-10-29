@@ -120,8 +120,14 @@ export function loadSheetsConfig(): ServerSheetsConfig {
     if (fs.existsSync(SHEETS_CONFIG_PATH)) {
       const raw = fs.readFileSync(SHEETS_CONFIG_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
+      const rawWebAppUrl = typeof parsed.webAppUrl === 'string' ? parsed.webAppUrl.trim() : '';
+      const resolvedWebAppUrl =
+        !rawWebAppUrl ||
+        rawWebAppUrl.includes('AKfycbxXScZJqOQ9myhQkmxUBClZx8LGj0xBgPxIskOTBMr_o4-hfQ-Tqq0dqus6jaOZX5gr')
+          ? process.env.GOOGLE_SHEETS_WEBHOOK_URL || EMBEDDED_APPS_SCRIPT_URL
+          : rawWebAppUrl;
       return {
-        webAppUrl: parsed.webAppUrl || process.env.GOOGLE_SHEETS_WEBHOOK_URL || EMBEDDED_APPS_SCRIPT_URL,
+        webAppUrl: resolvedWebAppUrl,
         spreadsheetUrl: parsed.spreadsheetUrl || EMBEDDED_SPREADSHEET_URL,
         driveFolderName: parsed.driveFolderName || process.env.GOOGLE_DRIVE_FOLDER_NAME || EMBEDDED_DRIVE_FOLDER_NAME,
         autoSync: parsed.autoSync !== undefined ? parsed.autoSync : true,

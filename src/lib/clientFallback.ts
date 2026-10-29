@@ -522,10 +522,15 @@ export function getGoogleSheetsWebhookUrl(): string {
   try {
     const saved = localStorage.getItem(SHEETS_URL_STORAGE_KEY);
     if (saved && saved.trim() !== '') {
-      if (isAppsScriptWebAppUrl(saved)) return saved.trim();
+      const trimmed = saved.trim();
+      if (trimmed.includes('AKfycbxXScZJqOQ9myhQkmxUBClZx8LGj0xBgPxIskOTBMr_o4-hfQ-Tqq0dqus6jaOZX5gr')) {
+        localStorage.setItem(SHEETS_URL_STORAGE_KEY, EMBEDDED_APPS_SCRIPT_URL);
+        return EMBEDDED_APPS_SCRIPT_URL;
+      }
+      if (isAppsScriptWebAppUrl(trimmed)) return trimmed;
       const envUrl = getEnvOrDefaultSheetsUrl();
       if (isAppsScriptWebAppUrl(envUrl)) return envUrl;
-      return saved.trim();
+      return trimmed;
     }
   } catch {}
   return getEnvOrDefaultSheetsUrl() || EMBEDDED_APPS_SCRIPT_URL;

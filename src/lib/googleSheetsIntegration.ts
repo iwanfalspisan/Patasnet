@@ -6,7 +6,10 @@ import defaultSheetsConfig from '../../data/sheets_config.json';
  * browsers, Incognito tabs, and Vercel deployments without ever starting empty.
  */
 export const EMBEDDED_APPS_SCRIPT_URL =
-  'https://script.google.com/macros/s/AKfycbxXScZJqOQ9myhQkmxUBClZx8LGj0xBgPxIskOTBMr_o4-hfQ-Tqq0dqus6jaOZX5gr/exec';
+  'https://script.google.com/macros/s/AKfycbxx8KSnUTRfbnNCDOfbINbvjVZ6QJz9pku66uBQwp5cC_om74XFCBvWwqqu6204Z6Kj/exec';
+export const LEGACY_APPS_SCRIPT_URLS = [
+  'https://script.google.com/macros/s/AKfycbxXScZJqOQ9myhQkmxUBClZx8LGj0xBgPxIskOTBMr_o4-hfQ-Tqq0dqus6jaOZX5gr/exec',
+];
 export const EMBEDDED_SPREADSHEET_URL =
   'https://docs.google.com/spreadsheets/d/1N_qoqU4a5Zu3wXrAQk3GKyNGWuiPtjl2BVf2BpX0TaM/edit?gid=0#gid=0';
 export const EMBEDDED_SPREADSHEET_ID = '1N_qoqU4a5Zu3wXrAQk3GKyNGWuiPtjl2BVf2BpX0TaM';
