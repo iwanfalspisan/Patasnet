@@ -619,52 +619,53 @@ export default function App() {
       let loggedIn = false;
       let loginData: any = null;
 
-      // 1. Try server-side authentication if available
-      try {
-        const response = await fetch('/api/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: loginEmail,
-            password: loginPassword,
-            isAdmin: loginIsAdmin,
-          }),
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          if (data && data.user) {
-            loginData = data;
-            loggedIn = true;
-          }
-        } else {
-          // If server returned a valid JSON error message (e.g. 401 wrong password), capture it
-          try {
-            const errData = await response.json();
-            if (errData && errData.message && response.status === 401) {
-              // Try local auth first if user is on static deployment before throwing error
-              const localAuth = authenticateLocally(loginEmail, loginPassword, loginIsAdmin);
-              if (localAuth.success) {
-                loginData = { user: localAuth.user };
-                loggedIn = true;
-              } else {
-                setLoginError(errData.message);
-                setLoginLoading(false);
-                return;
-              }
-            }
-          } catch {
-            // Not a JSON response (e.g. Vercel 404 HTML), proceed to local fallback
-          }
-        }
-      } catch (networkErr) {
-        console.warn('Backend API unreachable, using client authentication fallback for Vercel/offline:', networkErr);
+      // 1. Try local / instant Admin or cached Customer check first if server is unreachable or slow
+      const immediateLocalAuth = authenticateLocally(loginEmail, loginPassword, loginIsAdmin);
+      if (loginIsAdmin && (immediateLocalAuth.ok || immediateLocalAuth.success)) {
+        loginData = { user: immediateLocalAuth.user };
+        loggedIn = true;
       }
 
-      // 2. Client-side authentication fallback (Guarantees login works seamlessly on Vercel)
+      // 2. Try server-side authentication if not yet logged in
       if (!loggedIn) {
-        const localAuth = authenticateLocally(loginEmail, loginPassword, loginIsAdmin);
-        if (localAuth.success) {
+        try {
+          const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: loginEmail,
+              password: loginPassword,
+              isAdmin: loginIsAdmin,
+            }),
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            if (data && data.user) {
+              loginData = data;
+              loggedIn = true;
+            }
+          }
+        } catch (networkErr) {
+          console.warn('Backend API unreachable, using client/Google Sheets authentication for Vercel:', networkErr);
+        }
+      }
+
+      // 3. Client-side authentication fallback (Guarantees login works seamlessly on Vercel)
+      if (!loggedIn) {
+        let localAuth = authenticateLocally(loginEmail, loginPassword, loginIsAdmin);
+        // If customer not found locally on a fresh Vercel device, pull latest customers from Google Sheets first
+        if (!localAuth.ok && !localAuth.success && !loginIsAdmin) {
+          try {
+            const sheetData = await fetchFromGoogleSheets();
+            if (sheetData?.customers && sheetData.customers.length > 0) {
+              saveLocalCustomers(sheetData.customers);
+              localAuth = authenticateLocally(loginEmail, loginPassword, loginIsAdmin);
+            }
+          } catch {}
+        }
+
+        if (localAuth.ok || localAuth.success) {
           loginData = { user: localAuth.user };
           loggedIn = true;
         } else {
@@ -689,9 +690,8 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Login process error:', err);
-      // Even on unexpected error, attempt local authentication
       const localAuth = authenticateLocally(loginEmail, loginPassword, loginIsAdmin);
-      if (localAuth.success) {
+      if (localAuth.ok || localAuth.success) {
         setCurrentUser(localAuth.user);
         setLoginEmail('');
         setLoginPassword('');

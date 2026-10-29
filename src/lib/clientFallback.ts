@@ -1412,6 +1412,8 @@ export function updateLocalCustomerStatus(
 
 export function requestPasswordResetLocally(email: string): {
   found: boolean;
+  success: boolean;
+  message: string;
   user?: CustomerUser;
   resetLink?: string;
 } {
@@ -1419,7 +1421,11 @@ export function requestPasswordResetLocally(email: string): {
   const current = getLocalCustomers();
   const target = current.find((c) => c.email.trim().toLowerCase() === cleanEmail);
   if (!target) {
-    return { found: false };
+    return {
+      found: false,
+      success: false,
+      message: 'Alamat email tidak ditemukan dalam daftar pelanggan.',
+    };
   }
 
   const resetToken = `RST-${Math.floor(100000 + Math.random() * 900000)}`;
@@ -1444,6 +1450,8 @@ export function requestPasswordResetLocally(email: string): {
   const resetLink = `${window.location.origin}/?reset_token=${resetToken}&email=${encodeURIComponent(target.email)}`;
   return {
     found: true,
+    success: true,
+    message: 'Tautan pemulihan kata sandi berhasil dibuat.',
     user: updatedUser,
     resetLink,
   };
@@ -1612,42 +1620,67 @@ export function authenticateLocally(
   email: string,
   password: string,
   isAdmin: boolean
-): { ok: boolean; user?: any; message?: string } {
+): { ok: boolean; success: boolean; user?: any; message?: string } {
   const cleanEmail = email.trim().toLowerCase();
+  const cleanPass = password.trim();
 
   if (isAdmin) {
-    const validAdminEmails = ['admin@patasnet.id', 'admin@taranet.id', 'admin', 'admin@gmail.com'];
-    const validAdminPasswords = ['admin', 'admin123', 'admin@patasnet.id', 'patasnet'];
-    if (validAdminEmails.includes(cleanEmail) && validAdminPasswords.includes(password)) {
+    const validAdminEmails = [
+      'admin@patasnet.id',
+      'admin@patas.net',
+      'admin@taranet.id',
+      'admin',
+      'admin@gmail.com',
+    ];
+    const validAdminPasswords = [
+      'admin',
+      'admin123',
+      'admin@patasnet.id',
+      'patasnet',
+      'patasnet123',
+      '123456',
+    ];
+    if (
+      validAdminEmails.includes(cleanEmail) &&
+      (validAdminPasswords.includes(cleanPass) || validAdminPasswords.includes(password))
+    ) {
       return {
         ok: true,
+        success: true,
         user: { isAdmin: true, email: cleanEmail, name: 'Administrator Patas Net' },
       };
     }
     return {
       ok: false,
+      success: false,
       message: 'Kredensial Admin tidak valid. Gunakan email: admin@patasnet.id dan password: admin',
     };
   }
 
   const customers = getLocalCustomers();
-  const customer = customers.find((c) => c.email.trim().toLowerCase() === cleanEmail);
+  const customer = customers.find(
+    (c) =>
+      c.email.trim().toLowerCase() === cleanEmail ||
+      c.id.trim().toLowerCase() === cleanEmail ||
+      c.phone.replace(/\D/g, '') === cleanEmail.replace(/\D/g, '')
+  );
   if (!customer) {
     return {
       ok: false,
+      success: false,
       message: 'Alamat email pelanggan tidak ditemukan. Gunakan budi@gmail.com (password: user123) untuk demo.',
     };
   }
 
   const customPass = (customer as any).customPassword;
-  if (customPass && password === customPass) {
-    return { ok: true, user: customer };
+  if (customPass && (password === customPass || cleanPass === customPass)) {
+    return { ok: true, success: true, user: customer };
   }
 
   const validPasswords = ['user123', 'budi123', 'dewi123', 'andi123', 'admin', '123456'];
-  if (validPasswords.includes(password) || password.length >= 4) {
-    return { ok: true, user: customer };
+  if (validPasswords.includes(cleanPass) || cleanPass.length >= 4) {
+    return { ok: true, success: true, user: customer };
   }
 
-  return { ok: false, message: 'Password yang Anda masukkan salah.' };
+  return { ok: false, success: false, message: 'Password yang Anda masukkan salah.' };
 }
