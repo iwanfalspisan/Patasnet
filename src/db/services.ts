@@ -10,6 +10,7 @@ import {
   normalizeGoogleDriveImageUrl,
   sanitizeSheetSettings,
   EMBEDDED_DRIVE_LOGO_URL,
+  DEFAULT_HERO_SLIDES,
 } from '../lib/googleSheetsIntegration.ts';
 
 // ---------------------- PACKAGES & COVERAGE STORE (PERSISTED TO DISK & SHEETS) ----------------------
@@ -485,6 +486,31 @@ export async function createTicket(data: {
   return newTicket;
 }
 
+export async function updateTicketStatus(id: string, status: 'open' | 'resolved') {
+  const db = getGoogleSheetsDatabase();
+  let updatedTicket: SupportTicket | null = null;
+  for (let i = 0; i < (db.sheets.Tiket || []).length; i++) {
+    if (String(db.sheets.Tiket[i][1]) === String(id)) {
+      db.sheets.Tiket[i][6] = status;
+      const t = db.sheets.Tiket[i];
+      updatedTicket = {
+        id: String(t[1]),
+        userId: String(t[2] || ''),
+        userName: String(t[3] || ''),
+        email: '',
+        phone: String(t[4] || ''),
+        message: String(t[5] || ''),
+        date: String(t[0] || ''),
+        status: status,
+      };
+      break;
+    }
+  }
+  saveGoogleSheetsDatabase(db);
+  await syncSheetsWebhook('update_ticket_status', { id, status });
+  return updatedTicket;
+}
+
 // ---------------------- WIFI PACKAGES REPOSITORY ----------------------
 
 export async function getAllPackages(): Promise<WifiPackage[]> {
@@ -543,6 +569,24 @@ export async function updateCoverageData(cityName: string, kecamatans: any[]) {
   return formatCoverageList(cov);
 }
 
+export async function syncFullCoverage(coverageList: any[]) {
+  if (!Array.isArray(coverageList)) return getAllCoverage();
+  const normalized = coverageList.map((c, idx) => ({
+    id: c.id || idx + 1,
+    cityName: String(c.cityName || '').trim(),
+    regionType: c.regionType === 'Kabupaten' ? 'Kabupaten' : 'Kota',
+    kecamatans: Array.isArray(c.kecamatans) ? c.kecamatans : [],
+  }));
+  saveCoverageToDisk(normalized);
+  return formatCoverageList(normalized);
+}
+
+export async function syncFullPackages(packagesList: WifiPackage[]) {
+  if (!Array.isArray(packagesList)) return getAllPackages();
+  savePackagesToDisk(packagesList);
+  return packagesList;
+}
+
 // ---------------------- COMPANY SETTINGS REPOSITORY (GOOGLE SHEETS & DRIVE) ----------------------
 
 function loadExtraCompanySettings() {
@@ -561,6 +605,7 @@ function loadExtraCompanySettings() {
     themeColor: '#2563eb',
     logoUrl: EMBEDDED_DRIVE_LOGO_URL,
     promos: [] as string[],
+    heroSlides: DEFAULT_HERO_SLIDES,
     legalName: 'SMK Negeri 4 Tasikmalaya',
     tagline: 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
     coverageText: '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
@@ -607,6 +652,11 @@ function saveExtraCompanySettings(data: Record<string, any>) {
         persistImageForCrossDevice(pr, 'promos', `promo_${idx}`)
       );
     }
+    if (Array.isArray(processed.heroSlides)) {
+      processed.heroSlides = processed.heroSlides.map((sl: string, idx: number) =>
+        persistImageForCrossDevice(sl, 'promos', `hero_slide_${idx}`)
+      );
+    }
     const merged = sanitizeSheetSettings({ ...current, ...processed });
     delete merged._hadFormulaError;
     fs.writeFileSync(EXTRA_SETTINGS_PATH, JSON.stringify(merged, null, 2), 'utf-8');
@@ -626,11 +676,11 @@ export async function getCompanySettings() {
     if (key && val !== undefined && val !== null && String(val).trim() !== '') {
       if (key === 'qrisAutoVerify') {
         sheetSettings[key] = String(val) === 'true' || val === true;
-      } else if (key === 'promos') {
+      } else if (key === 'promos' || key === 'heroSlides') {
         try {
-          const parsedPromos = typeof val === 'string' ? JSON.parse(val) : val;
-          if (Array.isArray(parsedPromos)) {
-            sheetSettings.promos = parsedPromos;
+          const parsedArr = typeof val === 'string' ? JSON.parse(val) : val;
+          if (Array.isArray(parsedArr)) {
+            sheetSettings[key] = parsedArr;
           }
         } catch {}
       } else {
@@ -659,6 +709,11 @@ export async function getCompanySettings() {
       : Array.isArray(sheetSettings.promos)
       ? sheetSettings.promos.map((p: string) => normalizeGoogleDriveImageUrl(p))
       : [],
+    heroSlides: Array.isArray(extra.heroSlides) && extra.heroSlides.length > 0
+      ? extra.heroSlides.map((s: string) => normalizeGoogleDriveImageUrl(s))
+      : Array.isArray(sheetSettings.heroSlides) && sheetSettings.heroSlides.length > 0
+      ? sheetSettings.heroSlides.map((s: string) => normalizeGoogleDriveImageUrl(s))
+      : DEFAULT_HERO_SLIDES,
   };
 
   const merged = sanitizeSheetSettings(rawMerged);
@@ -673,6 +728,7 @@ export async function updateCompanySettings(data: {
   themeColor?: string;
   logoUrl?: string;
   promos?: string[];
+  heroSlides?: string[];
   legalName?: string;
   tagline?: string;
   coverageText?: string;
@@ -687,7 +743,26 @@ export async function updateCompanySettings(data: {
   qrisNmid?: string;
   qrisAutoVerify?: boolean;
   qrisInstructions?: string;
+  packagesJson?: string;
+  coverageJson?: string;
+  whatsappConfigJson?: string;
 }) {
+  if (data.packagesJson) {
+    try {
+      const parsedPkgs = JSON.parse(data.packagesJson);
+      if (Array.isArray(parsedPkgs) && parsedPkgs.length > 0) {
+        savePackagesToDisk(parsedPkgs);
+      }
+    } catch {}
+  }
+  if (data.coverageJson) {
+    try {
+      const parsedCov = JSON.parse(data.coverageJson);
+      if (Array.isArray(parsedCov)) {
+        saveCoverageToDisk(parsedCov);
+      }
+    } catch {}
+  }
   saveExtraCompanySettings(data);
   const current = loadExtraCompanySettings();
   await syncSheetsWebhook('update_settings', current);

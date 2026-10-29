@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Upload, MapPin, CheckCircle, Wifi, AlertTriangle, ArrowLeft, Eye, EyeOff, FileText, Sparkles } from 'lucide-react';
 import MapPicker from './MapPicker';
 import { PACKAGES } from './Home';
-import { syncToGoogleSheets } from '../lib/clientFallback';
+import { WifiPackage } from '../types';
+import { syncToGoogleSheets, getLocalPackages, getLocalSettings } from '../lib/clientFallback';
+import { notifyNewCustomerViaWhatsApp } from '../lib/whatsappApi';
 
 interface SubscriptionFormProps {
   selectedPackageId: string | null;
@@ -11,6 +13,7 @@ interface SubscriptionFormProps {
 }
 
 export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubmitSuccess }: SubscriptionFormProps) {
+  const [packagesList, setPackagesList] = useState<WifiPackage[]>(() => getLocalPackages());
   // Form states
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -36,12 +39,23 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
   const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
+    const syncPkgs = () => setPackagesList(getLocalPackages());
+    window.addEventListener('patasnet:data-updated', syncPkgs);
+    window.addEventListener('storage', syncPkgs);
+    return () => {
+      window.removeEventListener('patasnet:data-updated', syncPkgs);
+      window.removeEventListener('storage', syncPkgs);
+    };
+  }, []);
+
+  useEffect(() => {
     if (selectedPackageId) {
       setSelectedPkgId(selectedPackageId);
     }
   }, [selectedPackageId]);
 
-  const selectedPkg = PACKAGES.find((p) => p.id === selectedPkgId) || PACKAGES[0];
+  const activePackages = packagesList.length > 0 ? packagesList : PACKAGES;
+  const selectedPkg = activePackages.find((p) => p.id === selectedPkgId) || activePackages[0];
   const totalPrice = selectedPkg.price + (rentStb ? 25000 : 0);
 
   const handleLocationSelect = (lat: number, lng: number, addressDetail?: string) => {
@@ -65,7 +79,7 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
 
   const processFile = (file: File) => {
     if (!file.type.startsWith('image/')) {
-      alert('Hanya diperbolehkan mengunggah file gambar (KTP).');
+      setErrorMsg('Hanya diperbolehkan mengunggah file gambar (KTP).');
       return;
     }
     setKtpFile(file);
@@ -168,6 +182,18 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
 
       // Ensure data is synced directly to Google Sheets database immediately
       syncToGoogleSheets('subscribe', registeredUser).catch(() => {});
+
+      // Trigger automatic WhatsApp API notification to Admin & New Customer
+      try {
+        const waResult = await notifyNewCustomerViaWhatsApp(
+          registeredUser,
+          selectedPkg,
+          getLocalSettings()
+        );
+        registeredUser._waNotification = waResult;
+      } catch (waErr) {
+        console.warn('WhatsApp notification trigger warning:', waErr);
+      }
 
       onSubmitSuccess(registeredUser);
     } catch (err: any) {
@@ -303,14 +329,14 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-600 focus:outline-none bg-white text-xs font-semibold text-slate-800"
                 >
                   <optgroup label="Paket Rumah (Home)">
-                    {PACKAGES.filter((p) => p.type === 'home').map((p) => (
+                    {activePackages.filter((p) => p.type === 'home').map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name} - Rp {p.price.toLocaleString('id-ID')}/bln
                       </option>
                     ))}
                   </optgroup>
                   <optgroup label="Paket Premium / Bisnis">
-                    {PACKAGES.filter((p) => p.type === 'business').map((p) => (
+                    {activePackages.filter((p) => p.type === 'business').map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name} - Rp {p.price.toLocaleString('id-ID')}/bln
                       </option>

@@ -13,6 +13,13 @@ export const EMBEDDED_SPREADSHEET_ID = '1N_qoqU4a5Zu3wXrAQk3GKyNGWuiPtjl2BVf2BpX
 export const EMBEDDED_DRIVE_LOGO_URL = 'https://lh3.googleusercontent.com/d/19XTAmSKJriECYxElOmTLkvxpdhuP1wgA';
 export const EMBEDDED_DRIVE_FOLDER_NAME = 'PatasNet_Drive';
 
+export const DEFAULT_HERO_SLIDES: string[] = [
+  'https://images.unsplash.com/photo-1544197150-b99a580bb7a8?auto=format&fit=crop&w=1600&q=80',
+  'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=1600&q=80',
+  'https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=1600&q=80',
+  'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=1600&q=80',
+];
+
 /**
  * Google Sheets & Google Drive Cloud Database Integration for Patas Net
  *
@@ -96,6 +103,15 @@ export function sanitizeSheetSettings<T extends Record<string, any>>(settings: T
       } else if (val.startsWith("'+") || val.startsWith("'=")) {
         cleaned[key] = val.substring(1);
       }
+    }
+  }
+
+  if (typeof cleaned.heroSlides === 'string') {
+    try {
+      const parsed = JSON.parse(cleaned.heroSlides);
+      cleaned.heroSlides = Array.isArray(parsed) ? parsed : DEFAULT_HERO_SLIDES;
+    } catch {
+      cleaned.heroSlides = DEFAULT_HERO_SLIDES;
     }
   }
 
@@ -624,11 +640,63 @@ function doGet(e) {
   }
 }
 
+// Helper sinkronisasi penuh Sheet Paket (otomatis menambah & menghapus paket sesuai website)
+function syncSheetPaketData(ss, packagesList) {
+  if (!Array.isArray(packagesList)) return;
+  var sheetPaket = ss.getSheetByName("Paket");
+  if (!sheetPaket) return;
+  var lastRow = sheetPaket.getLastRow();
+  if (lastRow > 1) {
+    sheetPaket.getRange(2, 1, lastRow - 1, 7).clearContent();
+  }
+  for (var i = 0; i < packagesList.length; i++) {
+    var p = packagesList[i];
+    sheetPaket.appendRow([
+      String(p.id || ("pkg-" + (i + 1))),
+      String(p.name || ""),
+      String(p.speed || ""),
+      Number(p.price) || 0,
+      String(p.type || "home"),
+      Boolean(p.popular),
+      JSON.stringify(Array.isArray(p.features) ? p.features : [])
+    ]);
+  }
+}
+
+// Helper sinkronisasi penuh Sheet Cakupan (otomatis menambah & menghapus wilayah sesuai website)
+function syncSheetCakupanData(ss, coverageList) {
+  if (!Array.isArray(coverageList)) return;
+  var sheetCakupan = ss.getSheetByName("Cakupan");
+  if (!sheetCakupan) return;
+  var lastRow = sheetCakupan.getLastRow();
+  if (lastRow > 1) {
+    sheetCakupan.getRange(2, 1, lastRow - 1, 4).clearContent();
+  }
+  for (var i = 0; i < coverageList.length; i++) {
+    var c = coverageList[i];
+    sheetCakupan.appendRow([
+      Number(c.id) || (i + 1),
+      String(c.cityName || ""),
+      String(c.regionType || "Kota"),
+      JSON.stringify(Array.isArray(c.kecamatans) ? c.kecamatans : [])
+    ]);
+  }
+}
+
 // 3. ENDPOINT POST (Menyimpan perubahan data ke Sheet & mengunggah Gambar ke Google Drive)
 function doPost(e) {
   try {
     setupDatabaseOtomatis();
-    var payload = JSON.parse(e.postData.contents);
+    var rawBody = JSON.parse(e.postData.contents);
+    var payload = {};
+    if (rawBody && typeof rawBody.data === "object" && rawBody.data !== null) {
+      for (var dk in rawBody.data) {
+        payload[dk] = rawBody.data[dk];
+      }
+    }
+    for (var rk in rawBody) {
+      if (rk !== "data") payload[rk] = rawBody[rk];
+    }
     var action = payload.action || "subscribe";
     var ss = SpreadsheetApp.getActiveSpreadsheet();
 
@@ -739,11 +807,49 @@ function doPost(e) {
     if (action === "delete_customer") {
       var targetId = String(payload.id);
       var sheetPel = ss.getSheetByName("Pelanggan");
-      var pRows = sheetPel.getDataRange().getValues();
-      for (var r = pRows.length - 1; r >= 1; r--) {
-        if (String(pRows[r][1]) === targetId) sheetPel.deleteRow(r + 1);
+      if (sheetPel && sheetPel.getLastRow() > 1) {
+        var pRows = sheetPel.getDataRange().getValues();
+        for (var r = pRows.length - 1; r >= 1; r--) {
+          if (String(pRows[r][1]) === targetId) sheetPel.deleteRow(r + 1);
+        }
+      }
+      var sheetPayDel = ss.getSheetByName("Pembayaran");
+      if (sheetPayDel && sheetPayDel.getLastRow() > 1) {
+        var payRows = sheetPayDel.getDataRange().getValues();
+        for (var pr = payRows.length - 1; pr >= 1; pr--) {
+          if (String(payRows[pr][2]) === targetId) sheetPayDel.deleteRow(pr + 1);
+        }
+      }
+      var sheetTikDel = ss.getSheetByName("Tiket");
+      if (sheetTikDel && sheetTikDel.getLastRow() > 1) {
+        var tikRows = sheetTikDel.getDataRange().getValues();
+        for (var tr = tikRows.length - 1; tr >= 1; tr--) {
+          if (String(tikRows[tr][2]) === targetId) sheetTikDel.deleteRow(tr + 1);
+        }
       }
       return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === "update_packages" || action === "sync_packages") {
+      var pkgList = payload.packages;
+      if (!Array.isArray(pkgList) && payload.packagesJson) {
+        try { pkgList = JSON.parse(payload.packagesJson); } catch (e) {}
+      }
+      if (Array.isArray(pkgList)) {
+        syncSheetPaketData(ss, pkgList);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", message: "Sheet Paket berhasil diperbarui!" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === "update_coverage" || action === "sync_coverage") {
+      var covList = payload.coverage;
+      if (!Array.isArray(covList) && payload.coverageJson) {
+        try { covList = JSON.parse(payload.coverageJson); } catch (e) {}
+      }
+      if (Array.isArray(covList)) {
+        syncSheetCakupanData(ss, covList);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", message: "Sheet Cakupan berhasil diperbarui!" })).setMimeType(ContentService.MimeType.JSON);
     }
 
     if (action === "approve_payment") {
@@ -785,7 +891,7 @@ function doPost(e) {
       return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
     }
 
-    if (action === "create_ticket") {
+    if (action === "create_ticket" || action === "submit_ticket") {
       var sheetTik = ss.getSheetByName("Tiket");
       var safeTPhone = String(payload.phone || "");
       if (safeTPhone.indexOf("+") === 0 || safeTPhone.indexOf("=") === 0) {
@@ -800,6 +906,18 @@ function doPost(e) {
         payload.message || "",
         payload.status || "open"
       ]);
+      return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === "update_ticket_status") {
+      var sheetTik = ss.getSheetByName("Tiket");
+      var tRows = sheetTik.getDataRange().getValues();
+      for (var tIdx = 1; tIdx < tRows.length; tIdx++) {
+        if (String(tRows[tIdx][1]) === String(payload.id)) {
+          sheetTik.getRange(tIdx + 1, 7).setValue(payload.status || "resolved");
+          break;
+        }
+      }
       return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
     }
 
@@ -856,7 +974,11 @@ function doPost(e) {
         instagramUrl: payload.instagramUrl,
         facebookUrl: payload.facebookUrl,
         youtubeUrl: payload.youtubeUrl,
-        promos: finalPromosJson
+        promos: finalPromosJson,
+        heroSlides: Array.isArray(payload.heroSlides) ? JSON.stringify(payload.heroSlides) : undefined,
+        packagesJson: payload.packagesJson,
+        coverageJson: payload.coverageJson,
+        whatsappConfigJson: payload.whatsappConfigJson
       };
 
       for (var key in keysToUpdate) {
@@ -880,9 +1002,23 @@ function doPost(e) {
         }
       }
 
+      // Sinkronkan juga ke Sheet Paket & Sheet Cakupan apabila packagesJson / coverageJson ikut diperbarui
+      if (payload.packagesJson) {
+        try {
+          var parsedPkgs = JSON.parse(payload.packagesJson);
+          if (Array.isArray(parsedPkgs)) syncSheetPaketData(ss, parsedPkgs);
+        } catch (e) {}
+      }
+      if (payload.coverageJson) {
+        try {
+          var parsedCov = JSON.parse(payload.coverageJson);
+          if (Array.isArray(parsedCov)) syncSheetCakupanData(ss, parsedCov);
+        } catch (e) {}
+      }
+
       return ContentService.createTextOutput(JSON.stringify({
         status: "success",
-        message: "Pengaturan identitas, Logo, QRIS & Promo berhasil diperbarui di Google Sheet & Google Drive!",
+        message: "Pengaturan identitas, Logo, QRIS, Paket & Cakupan berhasil diperbarui di Google Sheet & Google Drive!",
         logoUrl: finalLogoUrl || payload.logoUrl,
         qrisUrl: finalQrisUrl || payload.qrisUrl
       })).setMimeType(ContentService.MimeType.JSON);
@@ -891,40 +1027,87 @@ function doPost(e) {
     if (action === "sync_all") {
       if (Array.isArray(payload.customers)) {
         var sheetPel = ss.getSheetByName("Pelanggan");
-        var existingCustData = sheetPel.getDataRange().getValues();
-        var existingIds = {};
-        for (var ex = 1; ex < existingCustData.length; ex++) {
-          if (existingCustData[ex][1]) existingIds[String(existingCustData[ex][1])] = true;
+        var pelLast = sheetPel.getLastRow();
+        if (pelLast > 1) {
+          sheetPel.getRange(2, 1, pelLast - 1, 11).clearContent();
+        }
+        var sheetPayAll = ss.getSheetByName("Pembayaran");
+        var payLast = sheetPayAll.getLastRow();
+        if (payLast > 1) {
+          sheetPayAll.getRange(2, 1, payLast - 1, 10).clearContent();
         }
 
         payload.customers.forEach(function(c) {
-          if (!existingIds[String(c.id)]) {
-            var ktpDrive = c.ktpImageUrl || "";
-            if (ktpDrive && String(ktpDrive).indexOf("data:") === 0) {
-              ktpDrive = saveBase64ToDrive(ktpDrive, "KTP_" + (c.name || "user") + "_" + c.id + ".jpg", "KTP_Pelanggan");
-            }
-            var cPhone = String(c.phone || "");
-            if (cPhone.indexOf("+") === 0 || cPhone.indexOf("=") === 0) cPhone = "'" + cPhone;
-            sheetPel.appendRow([
-              new Date(c.createdAt || Date.now()),
-              c.id,
-              c.name,
-              c.email,
-              cPhone,
-              c.address,
-              Array.isArray(c.coordinates) ? c.coordinates.join(", ") : "",
-              c.packageId,
-              c.status || "active",
-              ktpDrive,
-              "user123"
-            ]);
+          var ktpDrive = c.ktpImageUrl || "";
+          if (ktpDrive && String(ktpDrive).indexOf("data:") === 0) {
+            ktpDrive = saveBase64ToDrive(ktpDrive, "KTP_" + (c.name || "user") + "_" + c.id + ".jpg", "KTP_Pelanggan");
+          }
+          var cPhone = String(c.phone || "");
+          if (cPhone.indexOf("+") === 0 || cPhone.indexOf("=") === 0) cPhone = "'" + cPhone;
+          sheetPel.appendRow([
+            new Date(c.createdAt || Date.now()),
+            c.id,
+            c.name,
+            c.email,
+            cPhone,
+            c.address,
+            Array.isArray(c.coordinates) ? c.coordinates.join(", ") : "",
+            c.packageId,
+            c.status || "active",
+            ktpDrive,
+            "user123"
+          ]);
+
+          if (Array.isArray(c.payments)) {
+            c.payments.forEach(function(p) {
+              sheetPayAll.appendRow([
+                p.date || new Date(),
+                p.id,
+                c.id,
+                c.name,
+                Number(p.amount) || 0,
+                p.billingPeriod || "Tagihan Berjalan",
+                p.method || "Transfer Bank",
+                p.status || "unpaid",
+                p.proofOfPaymentUrl || "",
+                p.transactionId || ""
+              ]);
+            });
           }
         });
       }
 
+      if (Array.isArray(payload.tickets)) {
+        var sheetTikAll = ss.getSheetByName("Tiket");
+        var tikLast = sheetTikAll.getLastRow();
+        if (tikLast > 1) {
+          sheetTikAll.getRange(2, 1, tikLast - 1, 7).clearContent();
+        }
+        payload.tickets.forEach(function(t) {
+          var tPhone = String(t.phone || "");
+          if (tPhone.indexOf("+") === 0 || tPhone.indexOf("=") === 0) tPhone = "'" + tPhone;
+          sheetTikAll.appendRow([
+            t.date || new Date(),
+            t.id,
+            t.userId || "",
+            t.userName || "",
+            tPhone,
+            t.message || "",
+            t.status || "open"
+          ]);
+        });
+      }
+
+      if (Array.isArray(payload.packages)) {
+        syncSheetPaketData(ss, payload.packages);
+      }
+      if (Array.isArray(payload.coverage)) {
+        syncSheetCakupanData(ss, payload.coverage);
+      }
+
       return ContentService.createTextOutput(JSON.stringify({
         status: "success",
-        message: "Sinkronisasi batch ke Google Sheet & Google Drive berhasil diselesaikan!"
+        message: "Sinkronisasi penuh (tambah & hapus data) ke Google Sheet & Google Drive berhasil diselesaikan!"
       })).setMimeType(ContentService.MimeType.JSON);
     }
 

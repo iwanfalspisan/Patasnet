@@ -55,6 +55,20 @@ export interface AppConfig {
   paymentGatewayKey: string;
 }
 
+export interface WhatsAppApiConfig {
+  enabled: boolean;
+  provider: 'fonnte' | 'wablas' | 'ultramsg' | 'custom';
+  apiKey: string;
+  apiUrl: string;
+  instanceId?: string;
+  adminWhatsappNumber: string;
+  sendToAdminOnNewCustomer: boolean;
+  sendToCustomerOnNewCustomer: boolean;
+  autoOpenWaRedirectOnRegister: boolean;
+  adminNewCustomerTemplate: string;
+  customerWelcomeTemplate: string;
+}
+
 export interface CompanySettings {
   name: string;
   legalName?: string;
@@ -71,9 +85,13 @@ export interface CompanySettings {
   facebookUrl?: string;
   youtubeUrl?: string;
   promos?: string[];
+  heroSlides?: string[];
   qrisUrl?: string;
   qrisMerchantName?: string;
   qrisNmid?: string;
   qrisAutoVerify?: boolean;
   qrisInstructions?: string;
+  packagesJson?: string;
+  coverageJson?: string;
+  whatsappConfigJson?: string;
 }

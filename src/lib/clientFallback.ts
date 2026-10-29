@@ -1,299 +1,71 @@
-import { CustomerUser, PaymentRecord, SupportTicket, WifiPackage } from '../types';
+import { CustomerUser, SupportTicket, PaymentRecord, CompanySettings, WifiPackage } from '../types';
 import {
   normalizeGoogleDriveImageUrl,
-  getEnvOrDefaultSheetsUrl,
   sanitizeSheetSettings,
+  getEnvOrDefaultSheetsUrl,
   isAppsScriptWebAppUrl,
-  STORAGE_SHEETS_CONFIG_KEY,
+  extractSpreadsheetId,
   EMBEDDED_APPS_SCRIPT_URL,
-  EMBEDDED_SPREADSHEET_ID,
   EMBEDDED_DRIVE_LOGO_URL,
+  DEFAULT_HERO_SLIDES,
 } from './googleSheetsIntegration';
 
-const STORAGE_CUSTOMERS_KEY = 'patasnet_customers_v1';
-const STORAGE_TICKETS_KEY = 'patasnet_tickets_v1';
-const STORAGE_SETTINGS_KEY = 'patasnet_settings_v1';
-export const STORAGE_SHEETS_URL_KEY = 'patasnet_google_sheets_url';
+const CUSTOMERS_STORAGE_KEY = 'patasnet_local_customers_v1';
+const TICKETS_STORAGE_KEY = 'patasnet_local_tickets_v1';
+const SETTINGS_STORAGE_KEY = 'patasnet_local_settings_v1';
+const PACKAGES_STORAGE_KEY = 'patasnet_local_packages_v1';
+const COVERAGE_STORAGE_KEY = 'patasnet_local_coverage_v1';
+const LAST_MUTATION_TS_KEY = 'patasnet_last_local_mutation_ts';
+export const SHEETS_URL_STORAGE_KEY = 'patasnet_google_sheets_url';
 
-export function getGoogleSheetsWebhookUrl(): string {
-  const envUrl = getEnvOrDefaultSheetsUrl();
+export interface CoverageAreaItem {
+  id: number;
+  cityName: string;
+  regionType: string;
+  totalKecamatan?: number;
+  totalKelurahan?: number;
+  kecamatans: Array<{
+    name: string;
+    kelurahans: Array<{
+      name: string;
+      status?: string;
+      nodesCount?: number;
+    }>;
+  }>;
+}
+
+function markLocalMutation() {
   try {
-    const stored = (localStorage.getItem(STORAGE_SHEETS_URL_KEY) || '').trim();
-    let v2Url = '';
-    const rawV2 = localStorage.getItem(STORAGE_SHEETS_CONFIG_KEY);
-    if (rawV2) {
-      try {
-        v2Url = (JSON.parse(rawV2)?.webAppUrl || '').trim();
-      } catch {}
-    }
+    localStorage.setItem(LAST_MUTATION_TS_KEY, String(Date.now()));
+  } catch {}
+}
 
-    // Prefer a valid Google Apps Script Web App URL (script.google.com/macros/s/.../exec)
-    if (isAppsScriptWebAppUrl(stored)) return stored;
-    if (isAppsScriptWebAppUrl(v2Url)) return v2Url;
-    if (isAppsScriptWebAppUrl(envUrl)) return envUrl;
+function isWithinMutationCooldown(cooldownMs = 7000): boolean {
+  try {
+    const ts = Number(localStorage.getItem(LAST_MUTATION_TS_KEY) || '0');
+    return Date.now() - ts < cooldownMs;
   } catch {
-    // ignore
+    return false;
   }
-  return EMBEDDED_APPS_SCRIPT_URL;
 }
 
-export function saveGoogleSheetsWebhookUrl(url: string): void {
+export function broadcastDataUpdate(
+  type: 'settings' | 'packages' | 'coverage' | 'customers' | 'tickets' = 'settings'
+) {
   try {
-    const trimmed = (url || '').trim();
-    if (!trimmed) return;
-    const current = (localStorage.getItem(STORAGE_SHEETS_URL_KEY) || '').trim();
-
-    if (isAppsScriptWebAppUrl(current) && !isAppsScriptWebAppUrl(trimmed)) {
-      fetch('/api/sheets/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ webAppUrl: current }),
-      }).catch(() => {});
-      return;
+    window.dispatchEvent(new CustomEvent('patasnet:data-updated', { detail: { type } }));
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const bc = new BroadcastChannel('patasnet_sync');
+      bc.postMessage({ type: `REFRESH_${type.toUpperCase()}`, timestamp: Date.now() });
+      bc.close();
     }
-
-    localStorage.setItem(STORAGE_SHEETS_URL_KEY, trimmed);
-  } catch (e) {
-    console.warn('Failed to save Google Sheets URL:', e);
-  }
+  } catch {}
 }
 
-// Background sync to Google Sheets & Drive Webhook (100% compatible with Vercel static/serverless hosting)
-export async function syncToGoogleSheets(action: string, payload: any): Promise<boolean> {
-  const url = getGoogleSheetsWebhookUrl() || EMBEDDED_APPS_SCRIPT_URL;
-  let success = false;
-
-  const cleanPayload =
-    action === 'update_settings' || action === 'update_logo' || action === 'update_qris'
-      ? (() => {
-          const s = sanitizeSheetSettings({ ...payload });
-          delete s._hadFormulaError;
-          return s;
-        })()
-      : payload;
-
-  // 1. Direct send to Google Apps Script Web App using CORS-safe text/plain (works on Vercel without preflight block)
-  if (url && isAppsScriptWebAppUrl(url)) {
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        redirect: 'follow',
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8',
-        },
-        body: JSON.stringify({ action, ...cleanPayload }),
-      });
-      if (response.ok) {
-        success = true;
-        try {
-          const resJson = await response.json();
-          if (resJson && resJson.status === 'success') {
-            if (resJson.logoUrl || resJson.qrisUrl) {
-              saveLocalSettings({
-                ...(resJson.logoUrl ? { logoUrl: normalizeGoogleDriveImageUrl(resJson.logoUrl) } : {}),
-                ...(resJson.qrisUrl ? { qrisUrl: normalizeGoogleDriveImageUrl(resJson.qrisUrl) } : {}),
-              });
-            }
-            if (resJson.ktpUrl && cleanPayload.id) {
-              const custs = getLocalCustomers().map((c) =>
-                c.id === cleanPayload.id ? { ...c, ktpImageUrl: normalizeGoogleDriveImageUrl(resJson.ktpUrl) } : c
-              );
-              saveLocalCustomers(custs);
-            }
-            if (resJson.proofUrl && cleanPayload.paymentId) {
-              const custs = getLocalCustomers().map((c) => ({
-                ...c,
-                payments: (c.payments || []).map((p) =>
-                  p.id === cleanPayload.paymentId
-                    ? { ...p, proofOfPaymentUrl: normalizeGoogleDriveImageUrl(resJson.proofUrl) }
-                    : p
-                ),
-              }));
-              saveLocalCustomers(custs);
-            }
-          }
-        } catch {
-          // Non-JSON response is still ok
-        }
-      }
-    } catch (err) {
-      console.warn('[Google Sheets Direct Sync Warning]:', err);
-    }
-  }
-
-  // 2. Also send through server-side proxy when backend is running
-  try {
-    const sRes = await fetch('/api/sheets/proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, ...cleanPayload, url }),
-    });
-    if (sRes.ok) success = true;
-  } catch {
-    // Server offline on pure static Vercel deployment — direct Google Apps Script sync above handles it
-  }
-
-  return success;
-}
-
-// 2-Way Realtime synchronization: Fetch live data from Google Sheets & Drive Web App
-export async function fetchFromGoogleSheets(): Promise<{
-  customers?: CustomerUser[];
-  tickets?: SupportTicket[];
-  settings?: any;
-  packages?: WifiPackage[];
-  coverage?: any[];
-} | null> {
-  const url = getGoogleSheetsWebhookUrl() || EMBEDDED_APPS_SCRIPT_URL;
-
-  try {
-    let data: any = null;
-    let fetchedDirectlyFromAppsScript = false;
-
-    // 1. Fetch directly from the embedded Google Apps Script Web App URL for 100% live cloud data across all devices
-    if (url && isAppsScriptWebAppUrl(url)) {
-      try {
-        const res = await fetch(url, {
-          method: 'GET',
-          redirect: 'follow',
-          headers: {
-            Accept: 'application/json',
-          },
-        });
-        if (res.ok) {
-          const directJson = await res.json();
-          if (directJson && directJson.status === 'success') {
-            data = directJson;
-            fetchedDirectlyFromAppsScript = true;
-          }
-        }
-      } catch {
-        // Fallback to server proxy or direct Gviz reader below
-      }
-    }
-
-    // 2. If direct client fetch didn't return data, try server proxy
-    if (!data) {
-      try {
-        const serverRes = await fetch('/api/sheets/sync-down');
-        if (serverRes.ok) {
-          const contentType = serverRes.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            const sJson = await serverRes.json();
-            if (sJson && sJson.status === 'success') {
-              data = sJson;
-            }
-          }
-        }
-      } catch {
-        // server offline on static Vercel
-      }
-    }
-
-    // 3. Fallback: Direct Google Spreadsheet Gviz reader using EMBEDDED_SPREADSHEET_ID
-    if (!data && EMBEDDED_SPREADSHEET_ID) {
-      try {
-        const pengRes = await fetch(
-          `https://docs.google.com/spreadsheets/d/${EMBEDDED_SPREADSHEET_ID}/gviz/tq?tqx=out:json&sheet=Pengaturan`
-        );
-        if (pengRes.ok) {
-          const txt = await pengRes.text();
-          const m = txt.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\);?/);
-          if (m && m[1]) {
-            const gvizJson = JSON.parse(m[1]);
-            const rows = gvizJson?.table?.rows || [];
-            const gSettings: Record<string, any> = {};
-            rows.forEach((r: any) => {
-              const cells = r?.c;
-              if (Array.isArray(cells) && cells[0]?.v && cells[0].v !== 'Key') {
-                const k = String(cells[0].v).trim();
-                const v = cells[1]?.v !== undefined && cells[1]?.v !== null ? String(cells[1].v) : '';
-                gSettings[k] = k === 'qrisAutoVerify' ? v.toLowerCase() === 'true' : v;
-              }
-            });
-            if (Object.keys(gSettings).length > 0) {
-              data = { status: 'success', settings: gSettings };
-            }
-          }
-        }
-      } catch {}
-    }
-
-    if (data && data.status === 'success') {
-      const rawCustomers = Array.isArray(data.customers) ? data.customers : [];
-      const normalizedCustomers: CustomerUser[] = rawCustomers.map((c: any) => ({
-        ...c,
-        ktpImageUrl: normalizeGoogleDriveImageUrl(c.ktpImageUrl) || c.ktpImageUrl,
-        payments: Array.isArray(c.payments)
-          ? c.payments.map((p: any) => ({
-              ...p,
-              proofOfPaymentUrl: normalizeGoogleDriveImageUrl(p.proofOfPaymentUrl) || p.proofOfPaymentUrl,
-            }))
-          : [],
-      }));
-
-      if (normalizedCustomers.length > 0) {
-        saveLocalCustomers(normalizedCustomers);
-      }
-
-      if (Array.isArray(data.tickets)) {
-        saveLocalTickets(data.tickets);
-      }
-
-      let normalizedSettings = data.settings;
-      if (data.settings && typeof data.settings === 'object') {
-        const sanitized = sanitizeSheetSettings(data.settings);
-        const hadFormulaError = sanitized._hadFormulaError;
-        delete sanitized._hadFormulaError;
-
-        normalizedSettings = {
-          ...sanitized,
-          logoUrl: normalizeGoogleDriveImageUrl(sanitized.logoUrl) || sanitized.logoUrl || EMBEDDED_DRIVE_LOGO_URL,
-          qrisUrl: normalizeGoogleDriveImageUrl(sanitized.qrisUrl) || sanitized.qrisUrl || '',
-          promos: Array.isArray(sanitized.promos)
-            ? sanitized.promos.map((pr: string) => normalizeGoogleDriveImageUrl(pr) || pr)
-            : [],
-        };
-        saveLocalSettings(normalizedSettings);
-
-        if (hadFormulaError && fetchedDirectlyFromAppsScript) {
-          syncToGoogleSheets('update_settings', normalizedSettings).catch(() => {});
-        }
-      }
-
-      if (fetchedDirectlyFromAppsScript) {
-        fetch('/api/sheets/mirror', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            webAppUrl: url,
-            settings: normalizedSettings,
-            customers: normalizedCustomers,
-            tickets: data.tickets,
-          }),
-        }).catch(() => {});
-      }
-
-      return {
-        customers: normalizedCustomers.length > 0 ? normalizedCustomers : getLocalCustomers(),
-        tickets: Array.isArray(data.tickets) ? data.tickets : getLocalTickets(),
-        settings: normalizedSettings || getLocalSettings(),
-      };
-    }
-  } catch (err) {
-    console.warn('[Google Sheets 2-Way Fetch Warning]:', err);
-  }
-  return null;
-}
-
-export const DEFAULT_COMPANY_SETTINGS = {
+export const DEFAULT_COMPANY_SETTINGS: CompanySettings = {
   name: 'Patas.Net',
   legalName: 'SMK Negeri 4 Tasikmalaya',
   tagline: 'Internet Fiber Optic Cepat, Stabil & Tanpa Batas Kuota',
-  address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
-  logoText: 'PATAS NET',
-  themeColor: '#2563eb',
-  logoUrl: EMBEDDED_DRIVE_LOGO_URL,
   coverageText: '5 Kota/Kabupaten, 13 Kecamatan, 40 Kelurahan',
   whatsappNumber: '0812-3456-7890',
   phoneNumber: '+62 899-3299-977',
@@ -301,46 +73,19 @@ export const DEFAULT_COMPANY_SETTINGS = {
   instagramUrl: 'https://instagram.com/patasnet.id',
   facebookUrl: 'https://facebook.com/patasnet.id',
   youtubeUrl: 'https://youtube.com/@patasnet',
-  promos: [] as string[],
+  address: 'Jl. Raya Kebayoran Baru No. 12, Jakarta Selatan, DKI Jakarta 12110',
+  logoText: 'PATAS NET',
+  themeColor: '#2563eb',
+  logoUrl: EMBEDDED_DRIVE_LOGO_URL,
+  promos: [],
+  heroSlides: DEFAULT_HERO_SLIDES,
   qrisUrl: '',
   qrisMerchantName: 'PATAS NET - PT AMANUSA TELEMEDIA',
   qrisNmid: 'ID1020039281747',
   qrisAutoVerify: true,
-  qrisInstructions: 'Scan barcode QRIS dengan aplikasi Mobile Banking atau e-Wallet apa pun. Setelah bayar, klik Konfirmasi Pembayaran QRIS.',
+  qrisInstructions:
+    'Buka m-Banking atau e-Wallet Anda (BCA, Mandiri, BRI, BNI, GoPay, OVO, DANA, ShopeePay), scan barcode QRIS, masukkan nominal sesuai tagihan, lalu klik tombol Konfirmasi Pembayaran QRIS.',
 };
-
-export function getLocalSettings(): typeof DEFAULT_COMPANY_SETTINGS {
-  try {
-    const raw = localStorage.getItem(STORAGE_SETTINGS_KEY);
-    if (raw) {
-      const sanitized = sanitizeSheetSettings({ ...DEFAULT_COMPANY_SETTINGS, ...JSON.parse(raw) });
-      delete sanitized._hadFormulaError;
-      return sanitized;
-    }
-  } catch {
-    // ignore
-  }
-  return DEFAULT_COMPANY_SETTINGS;
-}
-
-export function saveLocalSettings(settings: Partial<typeof DEFAULT_COMPANY_SETTINGS>): void {
-  try {
-    const current = getLocalSettings();
-    const cleaned = sanitizeSheetSettings({ ...settings });
-    delete cleaned._hadFormulaError;
-    // Never overwrite an existing valid logo/qris with an empty string or undefined
-    if ((!cleaned.logoUrl || cleaned.logoUrl.trim() === '') && current.logoUrl && current.logoUrl.trim() !== '') {
-      cleaned.logoUrl = current.logoUrl;
-    }
-    if ((!cleaned.qrisUrl || cleaned.qrisUrl.trim() === '') && current.qrisUrl && current.qrisUrl.trim() !== '') {
-      cleaned.qrisUrl = current.qrisUrl;
-    }
-    const updated = { ...current, ...cleaned };
-    localStorage.setItem(STORAGE_SETTINGS_KEY, JSON.stringify(updated));
-  } catch (e) {
-    console.warn('Failed to save local settings:', e);
-  }
-}
 
 export const DEFAULT_PACKAGES: WifiPackage[] = [
   {
@@ -348,7 +93,13 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Home Basic 10 Mbps',
     speed: '10 Mbps',
     price: 120000,
-    features: ['Kecepatan Stabil up to 10 Mbps', 'Tanpa Batasan / Unlimited Kuota', 'Ideal untuk 1-3 perangkat', 'Bisa Sewa STB (+Rp25rb)', 'GRATIS Biaya Pasang'],
+    features: [
+      'Kecepatan Stabil up to 10 Mbps',
+      'Tanpa Batasan / Unlimited Kuota',
+      'Ideal untuk 1-3 perangkat',
+      'Bisa Sewa STB (+Rp25rb)',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'home',
     popular: false,
   },
@@ -357,7 +108,13 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Home Starter 15 Mbps',
     speed: '15 Mbps',
     price: 160000,
-    features: ['Kecepatan Stabil up to 15 Mbps', 'Tanpa Batasan / Unlimited Kuota', 'Ideal untuk 3-5 perangkat', 'Bisa Sewa STB (+Rp25rb)', 'GRATIS Biaya Pasang'],
+    features: [
+      'Kecepatan Stabil up to 15 Mbps',
+      'Tanpa Batasan / Unlimited Kuota',
+      'Ideal untuk 3-5 perangkat',
+      'Bisa Sewa STB (+Rp25rb)',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'home',
     popular: false,
   },
@@ -366,7 +123,13 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Home Lite 20 Mbps',
     speed: '20 Mbps',
     price: 170000,
-    features: ['Kecepatan Stabil up to 20 Mbps', 'Tanpa Batasan / Unlimited Kuota', 'Ideal untuk 4-6 perangkat', 'Bisa Sewa STB (+Rp25rb)', 'GRATIS Biaya Pasang'],
+    features: [
+      'Kecepatan Stabil up to 20 Mbps',
+      'Tanpa Batasan / Unlimited Kuota',
+      'Ideal untuk 4-6 perangkat',
+      'Bisa Sewa STB (+Rp25rb)',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'home',
     popular: true,
   },
@@ -375,7 +138,13 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Home Family 30 Mbps',
     speed: '30 Mbps',
     price: 210000,
-    features: ['Kecepatan Stabil up to 30 Mbps', 'Tanpa Batasan / Unlimited Kuota', 'Ideal untuk 6-8 perangkat', 'Bisa Sewa STB (+Rp25rb)', 'GRATIS Biaya Pasang'],
+    features: [
+      'Kecepatan Stabil up to 30 Mbps',
+      'Tanpa Batasan / Unlimited Kuota',
+      'Ideal untuk 6-8 perangkat',
+      'Bisa Sewa STB (+Rp25rb)',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'home',
     popular: false,
   },
@@ -384,7 +153,13 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Home Pro 50 Mbps',
     speed: '50 Mbps',
     price: 270000,
-    features: ['Kecepatan Stabil up to 50 Mbps', 'Tanpa Batasan / Unlimited Kuota', 'Ideal untuk 8-10 perangkat', 'Bisa Sewa STB (+Rp25rb)', 'GRATIS Biaya Pasang'],
+    features: [
+      'Kecepatan Stabil up to 50 Mbps',
+      'Tanpa Batasan / Unlimited Kuota',
+      'Ideal untuk 8-10 perangkat',
+      'Bisa Sewa STB (+Rp25rb)',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'home',
     popular: false,
   },
@@ -393,7 +168,13 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Home Ultra 100 Mbps',
     speed: '100 Mbps',
     price: 490000,
-    features: ['Kecepatan Stabil up to 100 Mbps', 'Tanpa Batasan / Unlimited Kuota', 'Ideal untuk 10-15 perangkat', 'Bisa Sewa STB (+Rp25rb)', 'GRATIS Biaya Pasang'],
+    features: [
+      'Kecepatan Stabil up to 100 Mbps',
+      'Tanpa Batasan / Unlimited Kuota',
+      'Ideal untuk 10-15 perangkat',
+      'Bisa Sewa STB (+Rp25rb)',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'home',
     popular: false,
   },
@@ -402,7 +183,15 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Patas Net PRIME 50 Mbps',
     speed: 'Up to 50 Mbps',
     price: 220000,
-    features: ['100% Fiber Optik Unlimited', 'Sosmed & Video Streaming HD', 'Upload & Download Simetris 1:1', 'Ideal untuk 10-15 perangkat aktif', 'Support CCTV Online Rumah', 'Streaming Smart TV 4K', 'GRATIS Biaya Pasang'],
+    features: [
+      '100% Fiber Optik Unlimited',
+      'Sosmed & Video Streaming HD',
+      'Upload & Download Simetris 1:1',
+      'Ideal untuk 10-15 perangkat aktif',
+      'Support CCTV Online Rumah',
+      'Streaming Smart TV 4K',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'business',
     popular: false,
   },
@@ -411,7 +200,16 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Patas Net EXCLUSIVE 100 Mbps',
     speed: 'Up to 100 Mbps',
     price: 275000,
-    features: ['100% Fiber Optik Unlimited', 'Sosmed & Video Streaming HD', 'Upload & Download Simetris 1:1', 'Ideal untuk 10-15 perangkat aktif', 'Support 2 CCTV Online Rumah', 'Streaming Smart TV 4K', 'Gaming Online Stabil', 'GRATIS Biaya Pasang'],
+    features: [
+      '100% Fiber Optik Unlimited',
+      'Sosmed & Video Streaming HD',
+      'Upload & Download Simetris 1:1',
+      'Ideal untuk 10-15 perangkat aktif',
+      'Support 2 CCTV Online Rumah',
+      'Streaming Smart TV 4K',
+      'Gaming Online Stabil',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'business',
     popular: true,
   },
@@ -420,7 +218,16 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Patas Net EXCLUSIVE II 200 Mbps',
     speed: 'Up to 200 Mbps',
     price: 310000,
-    features: ['100% Fiber Optik Unlimited', 'Sosmed & Video Streaming HD', 'Upload & Download Simetris 1:1', 'Ideal untuk 10-15 perangkat aktif', 'Support 3 CCTV Online Rumah', 'Streaming Smart TV 4K', 'Gaming Online Stabil', 'GRATIS Biaya Pasang'],
+    features: [
+      '100% Fiber Optik Unlimited',
+      'Sosmed & Video Streaming HD',
+      'Upload & Download Simetris 1:1',
+      'Ideal untuk 10-15 perangkat aktif',
+      'Support 3 CCTV Online Rumah',
+      'Streaming Smart TV 4K',
+      'Gaming Online Stabil',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'business',
     popular: false,
   },
@@ -429,511 +236,1418 @@ export const DEFAULT_PACKAGES: WifiPackage[] = [
     name: 'Patas Net BISNIS 300 Mbps',
     speed: 'Up to 300 Mbps',
     price: 375000,
-    features: ['100% Fiber Optik Unlimited', 'Sosmed & Video Streaming HD', 'Upload & Download Simetris 1:1', 'Ideal untuk 10-15 perangkat aktif', 'Support 5+ CCTV Online Rumah', 'Streaming Smart TV 4K', 'Gaming Online Super Stabil', 'GRATIS Biaya Pasang'],
+    features: [
+      '100% Fiber Optik Unlimited',
+      'Sosmed & Video Streaming HD',
+      'Upload & Download Simetris 1:1',
+      'Ideal untuk 10-15 perangkat aktif',
+      'Support 5+ CCTV Online Rumah',
+      'Streaming Smart TV 4K',
+      'Gaming Online Super Stabil',
+      'GRATIS Biaya Pasang',
+    ],
     type: 'business',
     popular: false,
   },
 ];
 
-const SEED_CUSTOMERS: CustomerUser[] = [
+export const DEFAULT_COVERAGE_AREAS: CoverageAreaItem[] = [
+  {
+    id: 1,
+    cityName: 'Jakarta Selatan',
+    regionType: 'Kota',
+    totalKecamatan: 4,
+    totalKelurahan: 14,
+    kecamatans: [
+      {
+        name: 'Kebayoran Baru',
+        kelurahans: [
+          { name: 'Rawa Barat', status: 'active', nodesCount: 12 },
+          { name: 'Selong', status: 'active', nodesCount: 8 },
+          { name: 'Melawai', status: 'active', nodesCount: 15 },
+          { name: 'Kramat Pela', status: 'active', nodesCount: 11 },
+          { name: 'Gunung', status: 'active', nodesCount: 9 },
+        ],
+      },
+      {
+        name: 'Cilandak',
+        kelurahans: [
+          { name: 'Cipete Selatan', status: 'active', nodesCount: 14 },
+          { name: 'Gandaria Selatan', status: 'active', nodesCount: 16 },
+          { name: 'Pondok Labu', status: 'active', nodesCount: 22 },
+          { name: 'Lebak Bulus', status: 'active', nodesCount: 18 },
+        ],
+      },
+      {
+        name: 'Mampang Prapatan',
+        kelurahans: [
+          { name: 'Kuningan Barat', status: 'active', nodesCount: 25 },
+          { name: 'Pela Mampang', status: 'active', nodesCount: 19 },
+          { name: 'Bangka', status: 'active', nodesCount: 15 },
+        ],
+      },
+      {
+        name: 'Tebet',
+        kelurahans: [
+          { name: 'Menteng Dalam', status: 'active', nodesCount: 14 },
+          { name: 'Tebet Barat', status: 'active', nodesCount: 17 },
+        ],
+      },
+    ],
+  },
+  {
+    id: 2,
+    cityName: 'Depok',
+    regionType: 'Kota',
+    totalKecamatan: 3,
+    totalKelurahan: 9,
+    kecamatans: [
+      {
+        name: 'Beji',
+        kelurahans: [
+          { name: 'Pondok Cina', status: 'active', nodesCount: 32 },
+          { name: 'Beji Timur', status: 'active', nodesCount: 12 },
+          { name: 'Kemiri Muka', status: 'active', nodesCount: 18 },
+        ],
+      },
+      {
+        name: 'Pancoran Mas',
+        kelurahans: [
+          { name: 'Depok Jaya', status: 'active', nodesCount: 14 },
+          { name: 'Mampang', status: 'active', nodesCount: 10 },
+          { name: 'Pancoran Mas', status: 'active', nodesCount: 16 },
+        ],
+      },
+      {
+        name: 'Cinere',
+        kelurahans: [
+          { name: 'Cinere', status: 'active', nodesCount: 20 },
+          { name: 'Gandul', status: 'active', nodesCount: 15 },
+          { name: 'Pangkalan Jati', status: 'active', nodesCount: 11 },
+        ],
+      },
+    ],
+  },
+  {
+    id: 3,
+    cityName: 'Tangerang Selatan',
+    regionType: 'Kota',
+    totalKecamatan: 3,
+    totalKelurahan: 8,
+    kecamatans: [
+      {
+        name: 'Serpong',
+        kelurahans: [
+          { name: 'Lengkong Gudang', status: 'active', nodesCount: 24 },
+          { name: 'Serpong', status: 'active', nodesCount: 18 },
+          { name: 'Cilenggang', status: 'active', nodesCount: 14 },
+        ],
+      },
+      {
+        name: 'Ciputat',
+        kelurahans: [
+          { name: 'Ciputat', status: 'active', nodesCount: 15 },
+          { name: 'Cipayung', status: 'active', nodesCount: 12 },
+          { name: 'Sawah Baru', status: 'active', nodesCount: 10 },
+        ],
+      },
+      {
+        name: 'Pondok Aren',
+        kelurahans: [
+          { name: 'Jurang Mangu Timur', status: 'active', nodesCount: 22 },
+          { name: 'Pondok Jaya', status: 'active', nodesCount: 16 },
+        ],
+      },
+    ],
+  },
+  {
+    id: 4,
+    cityName: 'Bogor',
+    regionType: 'Kota',
+    totalKecamatan: 2,
+    totalKelurahan: 6,
+    kecamatans: [
+      {
+        name: 'Bogor Timur',
+        kelurahans: [
+          { name: 'Baranangsiang', status: 'active', nodesCount: 19 },
+          { name: 'Katulampa', status: 'active', nodesCount: 28 },
+          { name: 'Sukasari', status: 'active', nodesCount: 11 },
+        ],
+      },
+      {
+        name: 'Bogor Selatan',
+        kelurahans: [
+          { name: 'Batutulis', status: 'active', nodesCount: 15 },
+          { name: 'Bondongan', status: 'active', nodesCount: 12 },
+          { name: 'Empang', status: 'active', nodesCount: 20 },
+        ],
+      },
+    ],
+  },
+  {
+    id: 5,
+    cityName: 'Ciomas (Bogor)',
+    regionType: 'Kabupaten',
+    totalKecamatan: 1,
+    totalKelurahan: 3,
+    kecamatans: [
+      {
+        name: 'Ciomas',
+        kelurahans: [
+          { name: 'Ciomas Rahayu', status: 'active', nodesCount: 24 },
+          { name: 'Ciomas Indah', status: 'active', nodesCount: 15 },
+          { name: 'Pagelaran', status: 'active', nodesCount: 31 },
+        ],
+      },
+    ],
+  },
+];
+
+export const INITIAL_FALLBACK_CUSTOMERS: CustomerUser[] = [
   {
     id: 'TR-1001',
     name: 'Budi Santoso',
     email: 'budi@gmail.com',
     phone: '081234567890',
-    address: 'Jl. Merdeka No. 10, Jakarta Selatan',
-    coordinates: [-6.2088, 106.8456],
+    address: 'Jl. Melawai Raya No. 45, Kebayoran Baru, Jakarta Selatan',
+    coordinates: [-6.2443, 106.8005],
     packageId: 'home-20m',
     status: 'active',
-    ktpImageUrl: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
-    createdAt: '2026-01-15T08:00:00.000Z',
+    ktpImageUrl:
+      'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
+    createdAt: '2026-06-15',
     payments: [
       {
         id: 'PAY-7001',
-        date: '2026-03-01',
+        date: '2026-06-15 10:25:00',
         amount: 170000,
         status: 'paid',
-        billingPeriod: 'Maret 2026',
+        billingPeriod: 'Juni 2026',
         method: 'Transfer Bank BCA',
-        proofOfPaymentUrl: 'https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80',
+        transactionId: 'TX-88001122',
+        proofOfPaymentUrl:
+          'https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80',
       },
       {
-        id: 'PAY-7004',
-        date: '2026-04-01',
+        id: 'PAY-7002',
+        date: '2026-07-01 08:00:00',
         amount: 170000,
         status: 'unpaid',
-        billingPeriod: 'April 2026',
-        method: 'Transfer Bank BCA',
+        billingPeriod: 'Juli 2026',
       },
     ],
+    tickets: [],
   },
   {
     id: 'TR-1002',
     name: 'Dewi Lestari',
     email: 'dewi@gmail.com',
     phone: '081298765432',
-    address: 'Jl. Melati No. 5, Kebayoran Baru, Jakarta Selatan',
-    coordinates: [-6.2415, 106.8000],
+    address: 'Jl. Cipete Raya No. 12, Cilandak, Jakarta Selatan',
+    coordinates: [-6.2781, 106.8052],
     packageId: 'patasnet-exclusive',
     status: 'active',
-    ktpImageUrl: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
-    createdAt: '2026-02-10T10:30:00.000Z',
+    ktpImageUrl:
+      'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
+    createdAt: '2026-06-20',
     payments: [
       {
-        id: 'PAY-7002',
-        date: '2026-03-01',
+        id: 'PAY-7003',
+        date: '2026-06-20 14:15:00',
         amount: 275000,
         status: 'paid',
-        billingPeriod: 'Maret 2026',
+        billingPeriod: 'Juni 2026',
+        method: 'QRIS',
+        transactionId: 'TX-88003344',
+        proofOfPaymentUrl:
+          'https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80',
+      },
+      {
+        id: 'PAY-7004',
+        date: '2026-07-02 16:40:00',
+        amount: 275000,
+        status: 'pending_verification',
+        billingPeriod: 'Juli 2026',
         method: 'Transfer Bank Mandiri',
-        proofOfPaymentUrl: 'https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80',
+        proofOfPaymentUrl:
+          'https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80',
       },
     ],
+    tickets: [],
   },
   {
     id: 'TR-1003',
     name: 'Andi Wijaya',
     email: 'andi@gmail.com',
-    phone: '081311223344',
-    address: 'Jl. Sudirman No. 45, Jakarta Selatan',
-    coordinates: [-6.2198, 106.8180],
-    packageId: 'patasnet-prime',
+    phone: '081345678901',
+    address: 'Jl. Margonda Raya No. 102, Beji, Depok',
+    coordinates: [-6.3651, 106.8328],
+    packageId: 'home-50m',
     status: 'pending',
-    ktpImageUrl: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
-    createdAt: '2026-03-20T14:15:00.000Z',
+    ktpImageUrl:
+      'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
+    createdAt: '2026-07-03',
     payments: [
       {
-        id: 'PAY-7003',
-        date: '2026-03-20',
-        amount: 220000,
-        status: 'pending_verification',
-        billingPeriod: 'Maret 2026',
-        method: 'Transfer Bank BRI',
-        proofOfPaymentUrl: 'https://images.unsplash.com/photo-1554415707-6e8cfc93fe23?auto=format&fit=crop&w=400&q=80',
+        id: 'PAY-7005',
+        date: '2026-07-03 11:00:00',
+        amount: 270000,
+        status: 'unpaid',
+        billingPeriod: 'Juli 2026',
       },
     ],
+    tickets: [],
   },
 ];
 
-const SEED_TICKETS: SupportTicket[] = [
+export const INITIAL_FALLBACK_TICKETS: SupportTicket[] = [
   {
-    id: 'TCK-2001',
+    id: 'TKT-101',
     userId: 'TR-1001',
     userName: 'Budi Santoso',
     email: 'budi@gmail.com',
     phone: '081234567890',
-    message: 'Koneksi WiFi Patas Net di rumah lambat sekali sejak hujan tadi sore, mohon diperiksa jalurnya.',
-    date: '2026-03-22 17:30',
-    status: 'resolved',
-  },
-  {
-    id: 'TCK-2002',
-    userId: 'TR-1003',
-    userName: 'Andi Wijaya',
-    email: 'andi@gmail.com',
-    phone: '081311223344',
-    message: 'Kapan jadwal teknisi untuk pemasangan modem kabel optik di rumah saya?',
-    date: '2026-03-23 09:15',
+    message: 'Lampu indikator PON pada modem berkedip merah sejak pagi ini, mohon pengecekan.',
+    date: '2026-07-02 09:30',
     status: 'open',
   },
 ];
 
-// Get stored customers with fallback
-export function getLocalCustomers(): CustomerUser[] {
+// ==========================================
+// GOOGLE SHEETS URL HELPERS
+// ==========================================
+
+export function getGoogleSheetsWebhookUrl(): string {
   try {
-    const raw = localStorage.getItem(STORAGE_CUSTOMERS_KEY);
+    const saved = localStorage.getItem(SHEETS_URL_STORAGE_KEY);
+    if (saved && saved.trim() !== '') {
+      if (isAppsScriptWebAppUrl(saved)) return saved.trim();
+      const envUrl = getEnvOrDefaultSheetsUrl();
+      if (isAppsScriptWebAppUrl(envUrl)) return envUrl;
+      return saved.trim();
+    }
+  } catch {}
+  return getEnvOrDefaultSheetsUrl() || EMBEDDED_APPS_SCRIPT_URL;
+}
+
+export function saveGoogleSheetsWebhookUrl(url: string) {
+  try {
+    localStorage.setItem(SHEETS_URL_STORAGE_KEY, url.trim());
+  } catch (err) {
+    console.warn('Failed to save Google Sheets URL to localStorage:', err);
+  }
+}
+
+// ==========================================
+// SETTINGS STORAGE
+// ==========================================
+
+export function getLocalSettings(): CompanySettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(DEFAULT_COMPANY_SETTINGS));
+      return DEFAULT_COMPANY_SETTINGS;
+    }
+    const parsed = sanitizeSheetSettings({
+      ...DEFAULT_COMPANY_SETTINGS,
+      ...JSON.parse(raw),
+    });
+    delete (parsed as any)._hadFormulaError;
+    if (parsed.logoUrl) parsed.logoUrl = normalizeGoogleDriveImageUrl(parsed.logoUrl);
+    if (parsed.qrisUrl) parsed.qrisUrl = normalizeGoogleDriveImageUrl(parsed.qrisUrl);
+    if (Array.isArray(parsed.promos)) {
+      parsed.promos = parsed.promos.map((p: string) => normalizeGoogleDriveImageUrl(p));
+    }
+    if (Array.isArray(parsed.heroSlides) && parsed.heroSlides.length > 0) {
+      parsed.heroSlides = parsed.heroSlides.map((s: string) => normalizeGoogleDriveImageUrl(s));
+    } else {
+      parsed.heroSlides = DEFAULT_HERO_SLIDES;
+    }
+    return parsed;
+  } catch {
+    return DEFAULT_COMPANY_SETTINGS;
+  }
+}
+
+export function saveLocalSettings(settings: CompanySettings): CompanySettings {
+  try {
+    const cleaned = sanitizeSheetSettings({
+      ...DEFAULT_COMPANY_SETTINGS,
+      ...settings,
+    });
+    delete (cleaned as any)._hadFormulaError;
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(cleaned));
+    return cleaned;
+  } catch (e) {
+    console.warn('Error saving local settings:', e);
+    return settings;
+  }
+}
+
+// ==========================================
+// WIFI PACKAGES STORAGE (LOCAL + CLOUD SYNC)
+// ==========================================
+
+export function getLocalPackages(): WifiPackage[] {
+  try {
+    const raw = localStorage.getItem(PACKAGES_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((c: any) => ({
-          ...c,
-          payments: Array.isArray(c?.payments) ? c.payments : [],
+        return parsed.map((p: any) => ({
+          id: String(p.id || `pkg-${Date.now()}`),
+          name: String(p.name || 'Paket Internet'),
+          speed: String(p.speed || '20 Mbps'),
+          price: Number(p.price) || 150000,
+          features: Array.isArray(p.features)
+            ? p.features
+            : typeof p.features === 'string'
+            ? p.features
+                .split(/\r?\n|,/)
+                .map((f: string) => f.trim())
+                .filter(Boolean)
+            : ['100% Fiber Optik Unlimited', 'GRATIS Biaya Pasang'],
+          type: p.type === 'business' ? 'business' : 'home',
+          popular: Boolean(p.popular || p.isPopular),
         }));
       }
     }
   } catch (e) {
-    console.warn('Failed to read local customers from storage:', e);
+    console.warn('Failed to read packages from localStorage:', e);
   }
-  // Store default seed
-  saveLocalCustomers(SEED_CUSTOMERS);
-  return SEED_CUSTOMERS;
+  localStorage.setItem(PACKAGES_STORAGE_KEY, JSON.stringify(DEFAULT_PACKAGES));
+  return DEFAULT_PACKAGES;
 }
 
-export function saveLocalCustomers(list: CustomerUser[]): void {
+export function saveLocalPackages(packages: WifiPackage[], syncToCloud = true): WifiPackage[] {
+  const normalized: WifiPackage[] = packages.map((p) => ({
+    id: String(p.id),
+    name: String(p.name).trim(),
+    speed: String(p.speed).trim(),
+    price: Number(p.price) || 0,
+    features: Array.isArray(p.features) ? p.features : [],
+    type: p.type === 'business' ? 'business' : 'home',
+    popular: Boolean(p.popular),
+  }));
+
   try {
-    const safeList = (list || []).map((c: any) => ({
-      ...c,
-      payments: Array.isArray(c?.payments) ? c.payments : [],
-    }));
-    localStorage.setItem(STORAGE_CUSTOMERS_KEY, JSON.stringify(safeList));
+    localStorage.setItem(PACKAGES_STORAGE_KEY, JSON.stringify(normalized));
+  } catch {}
+
+  if (syncToCloud) {
+    markLocalMutation();
+    const currentSettings = getLocalSettings();
+    const updatedSettings: CompanySettings = {
+      ...currentSettings,
+      packagesJson: JSON.stringify(normalized),
+    };
+    saveLocalSettings(updatedSettings);
+    syncToGoogleSheets('update_settings', updatedSettings).catch(() => {});
+    syncToGoogleSheets('update_packages', { packages: normalized }).catch(() => {});
+  }
+
+  broadcastDataUpdate('packages');
+  return normalized;
+}
+
+export function addOrUpdateLocalPackage(pkg: WifiPackage): WifiPackage[] {
+  const current = getLocalPackages();
+  const idx = current.findIndex((p) => p.id === pkg.id);
+  let next: WifiPackage[];
+  if (idx >= 0) {
+    next = [...current];
+    next[idx] = pkg;
+  } else {
+    next = [...current, pkg];
+  }
+  return saveLocalPackages(next, true);
+}
+
+export function deleteLocalPackage(id: string): WifiPackage[] {
+  const current = getLocalPackages();
+  const next = current.filter((p) => p.id !== id);
+  return saveLocalPackages(next, true);
+}
+
+// ==========================================
+// COVERAGE AREAS STORAGE (LOCAL + CLOUD SYNC)
+// ==========================================
+
+function normalizeCoverageItems(rawList: any[]): CoverageAreaItem[] {
+  return rawList.map((c: any, idx: number) => {
+    const rawKecs = Array.isArray(c.kecamatans)
+      ? c.kecamatans
+      : Array.isArray(c.kecamatan)
+      ? c.kecamatan
+      : [];
+
+    const kecamatans = rawKecs.map((k: any) => {
+      const rawKels = Array.isArray(k.kelurahans)
+        ? k.kelurahans
+        : Array.isArray(k.kelurahan)
+        ? k.kelurahan
+        : [];
+      return {
+        name: String(k.name || ''),
+        kelurahans: rawKels.map((kl: any) => ({
+          name: String(typeof kl === 'string' ? kl : kl.name || ''),
+          status: kl.status || 'active',
+          nodesCount: Number(kl.nodesCount ?? kl.nodes ?? 12) || 12,
+        })),
+      };
+    });
+
+    const totalKelurahan = kecamatans.reduce((acc: number, k: any) => acc + (k.kelurahans?.length || 0), 0);
+    return {
+      id: Number(c.id) || idx + 1,
+      cityName: String(c.cityName || c.name || 'Wilayah'),
+      regionType: c.regionType === 'Kabupaten' || c.type === 'Kabupaten' ? 'Kabupaten' : 'Kota',
+      totalKecamatan: kecamatans.length,
+      totalKelurahan,
+      kecamatans,
+    };
+  });
+}
+
+export function computeCoverageSummaryText(coverageList: CoverageAreaItem[]): string {
+  const totalCities = coverageList.length;
+  const totalKec = coverageList.reduce((acc, c) => acc + (c.kecamatans?.length || 0), 0);
+  const totalKel = coverageList.reduce(
+    (acc, c) => acc + (c.kecamatans || []).reduce((kAcc, k) => kAcc + (k.kelurahans?.length || 0), 0),
+    0
+  );
+  return `${totalCities} Kota/Kabupaten, ${totalKec} Kecamatan, ${totalKel} Kelurahan`;
+}
+
+export function getLocalCoverage(): CoverageAreaItem[] {
+  try {
+    const raw = localStorage.getItem(COVERAGE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return normalizeCoverageItems(parsed);
+      }
+    }
   } catch (e) {
-    console.warn('Failed to save local customers to storage:', e);
+    console.warn('Failed to read coverage from localStorage:', e);
+  }
+  localStorage.setItem(COVERAGE_STORAGE_KEY, JSON.stringify(DEFAULT_COVERAGE_AREAS));
+  return DEFAULT_COVERAGE_AREAS;
+}
+
+export function saveLocalCoverage(coverage: CoverageAreaItem[], syncToCloud = true): CoverageAreaItem[] {
+  const normalized = normalizeCoverageItems(coverage);
+  try {
+    localStorage.setItem(COVERAGE_STORAGE_KEY, JSON.stringify(normalized));
+  } catch {}
+
+  const summaryText = computeCoverageSummaryText(normalized);
+  const currentSettings = getLocalSettings();
+  const updatedSettings: CompanySettings = {
+    ...currentSettings,
+    coverageText: summaryText,
+    coverageJson: JSON.stringify(normalized),
+  };
+  saveLocalSettings(updatedSettings);
+
+  if (syncToCloud) {
+    markLocalMutation();
+    syncToGoogleSheets('update_settings', updatedSettings).catch(() => {});
+    syncToGoogleSheets('update_coverage', { coverage: normalized }).catch(() => {});
+  }
+
+  broadcastDataUpdate('coverage');
+  broadcastDataUpdate('settings');
+  return normalized;
+}
+
+export function addLocalCoverageCity(cityName: string, regionType: string): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const trimmed = cityName.trim();
+  if (!trimmed) return current;
+  if (current.some((c) => c.cityName.toLowerCase() === trimmed.toLowerCase())) {
+    return current;
+  }
+  const next: CoverageAreaItem[] = [
+    ...current,
+    {
+      id: Date.now(),
+      cityName: trimmed,
+      regionType: regionType === 'Kabupaten' ? 'Kabupaten' : 'Kota',
+      totalKecamatan: 0,
+      totalKelurahan: 0,
+      kecamatans: [],
+    },
+  ];
+  return saveLocalCoverage(next, true);
+}
+
+export function updateLocalCoverageCity(
+  oldCityName: string,
+  newCityName: string,
+  regionType: string
+): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const trimmed = newCityName.trim();
+  if (!trimmed) return current;
+  const next = current.map((c) =>
+    c.cityName === oldCityName
+      ? { ...c, cityName: trimmed, regionType: regionType === 'Kabupaten' ? 'Kabupaten' : 'Kota' }
+      : c
+  );
+  return saveLocalCoverage(next, true);
+}
+
+export function deleteLocalCoverageCity(cityName: string): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const next = current.filter((c) => c.cityName !== cityName);
+  return saveLocalCoverage(next, true);
+}
+
+export function addLocalKecamatan(cityName: string, name: string): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const trimmed = name.trim();
+  if (!trimmed) return current;
+  const next = current.map((c) => {
+    if (c.cityName !== cityName) return c;
+    if (c.kecamatans.some((k) => k.name.toLowerCase() === trimmed.toLowerCase())) return c;
+    return {
+      ...c,
+      kecamatans: [...c.kecamatans, { name: trimmed, kelurahans: [] }],
+    };
+  });
+  return saveLocalCoverage(next, true);
+}
+
+export function updateLocalKecamatan(
+  cityName: string,
+  oldName: string,
+  newName: string
+): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const trimmed = newName.trim();
+  if (!trimmed) return current;
+  const next = current.map((c) => {
+    if (c.cityName !== cityName) return c;
+    return {
+      ...c,
+      kecamatans: c.kecamatans.map((k) => (k.name === oldName ? { ...k, name: trimmed } : k)),
+    };
+  });
+  return saveLocalCoverage(next, true);
+}
+
+export function deleteLocalKecamatan(cityName: string, name: string): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const next = current.map((c) => {
+    if (c.cityName !== cityName) return c;
+    return {
+      ...c,
+      kecamatans: c.kecamatans.filter((k) => k.name !== name),
+    };
+  });
+  return saveLocalCoverage(next, true);
+}
+
+export function addLocalKelurahan(
+  cityName: string,
+  kecamatanName: string,
+  name: string,
+  nodesCount = 15
+): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const trimmed = name.trim();
+  if (!trimmed) return current;
+  const next = current.map((c) => {
+    if (c.cityName !== cityName) return c;
+    return {
+      ...c,
+      kecamatans: c.kecamatans.map((k) => {
+        if (k.name !== kecamatanName) return k;
+        const existingIdx = k.kelurahans.findIndex(
+          (kl) => kl.name.toLowerCase() === trimmed.toLowerCase()
+        );
+        if (existingIdx >= 0) {
+          const updatedKels = [...k.kelurahans];
+          updatedKels[existingIdx] = {
+            name: trimmed,
+            status: 'active',
+            nodesCount: Number(nodesCount) || 15,
+          };
+          return { ...k, kelurahans: updatedKels };
+        }
+        return {
+          ...k,
+          kelurahans: [
+            ...k.kelurahans,
+            { name: trimmed, status: 'active', nodesCount: Number(nodesCount) || 15 },
+          ],
+        };
+      }),
+    };
+  });
+  return saveLocalCoverage(next, true);
+}
+
+export function updateLocalKelurahan(
+  cityName: string,
+  kecamatanName: string,
+  oldName: string,
+  newName: string,
+  nodesCount = 15
+): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const trimmed = newName.trim();
+  if (!trimmed) return current;
+  const next = current.map((c) => {
+    if (c.cityName !== cityName) return c;
+    return {
+      ...c,
+      kecamatans: c.kecamatans.map((k) => {
+        if (k.name !== kecamatanName) return k;
+        return {
+          ...k,
+          kelurahans: k.kelurahans.map((kl) =>
+            kl.name === oldName
+              ? { ...kl, name: trimmed, nodesCount: Number(nodesCount) || kl.nodesCount || 15 }
+              : kl
+          ),
+        };
+      }),
+    };
+  });
+  return saveLocalCoverage(next, true);
+}
+
+export function deleteLocalKelurahan(
+  cityName: string,
+  kecamatanName: string,
+  name: string
+): CoverageAreaItem[] {
+  const current = getLocalCoverage();
+  const next = current.map((c) => {
+    if (c.cityName !== cityName) return c;
+    return {
+      ...c,
+      kecamatans: c.kecamatans.map((k) => {
+        if (k.name !== kecamatanName) return k;
+        return {
+          ...k,
+          kelurahans: k.kelurahans.filter((kl) => kl.name !== name),
+        };
+      }),
+    };
+  });
+  return saveLocalCoverage(next, true);
+}
+
+// ==========================================
+// GOOGLE SHEETS DIRECT FETCH & SYNC
+// ==========================================
+
+async function fetchDirectSpreadsheetGviz(spreadsheetId: string): Promise<{
+  customers: CustomerUser[];
+  tickets: SupportTicket[];
+  settings?: CompanySettings;
+} | null> {
+  const fetchSheetRows = async (sheetName: string): Promise<any[][]> => {
+    try {
+      const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const text = await res.text();
+      const jsonStart = text.indexOf('{');
+      const jsonEnd = text.lastIndexOf('}');
+      if (jsonStart === -1 || jsonEnd === -1) return [];
+      const json = JSON.parse(text.substring(jsonStart, jsonEnd + 1));
+      const rows = json?.table?.rows || [];
+      return rows.map((r: any) => (r.c || []).map((cell: any) => (cell ? (cell.v ?? cell.f ?? '') : '')));
+    } catch {
+      return [];
+    }
+  };
+
+  try {
+    const [pelangganRows, pembayaranRows, tiketRows, pengaturanRows] = await Promise.all([
+      fetchSheetRows('Pelanggan'),
+      fetchSheetRows('Pembayaran'),
+      fetchSheetRows('Tiket'),
+      fetchSheetRows('Pengaturan'),
+    ]);
+
+    if (pelangganRows.length === 0 && pengaturanRows.length === 0) {
+      return null;
+    }
+
+    const customers: CustomerUser[] = pelangganRows
+      .filter((r) => r[1] && String(r[1]) !== 'ID Pelanggan')
+      .map((r) => {
+        const id = String(r[1]);
+        const coordsStr = String(r[6] || '-6.2088, 106.8456');
+        const coords: [number, number] = coordsStr.includes(',')
+          ? (coordsStr.split(',').map((n) => parseFloat(n.trim())) as [number, number])
+          : [-6.2088, 106.8456];
+
+        const payments: PaymentRecord[] = pembayaranRows
+          .filter((p) => String(p[2]) === id)
+          .map((p) => ({
+            id: String(p[1]),
+            date: String(p[0] || '').substring(0, 19),
+            amount: Number(p[4]) || 170000,
+            billingPeriod: String(p[5] || 'Tagihan Berjalan'),
+            method: String(p[6] || 'Transfer Bank'),
+            status: (p[7] || 'unpaid') as 'unpaid' | 'pending_verification' | 'paid',
+            proofOfPaymentUrl: normalizeGoogleDriveImageUrl(String(p[8] || '')) || undefined,
+            transactionId: p[9] ? String(p[9]) : undefined,
+          }));
+
+        return {
+          id,
+          name: String(r[2] || ''),
+          email: String(r[3] || ''),
+          phone: String(r[4] || ''),
+          address: String(r[5] || ''),
+          coordinates: coords,
+          packageId: String(r[7] || 'home-20m'),
+          status: (r[8] || 'pending') as 'pending' | 'active' | 'suspended',
+          ktpImageUrl: normalizeGoogleDriveImageUrl(String(r[9] || '')) || undefined,
+          createdAt: String(r[0] || '').substring(0, 10),
+          payments,
+          tickets: [],
+        };
+      });
+
+    const tickets: SupportTicket[] = tiketRows
+      .filter((t) => t[1] && String(t[1]) !== 'ID Tiket')
+      .map((t) => ({
+        id: String(t[1]),
+        userId: String(t[2] || ''),
+        userName: String(t[3] || ''),
+        email: '',
+        phone: String(t[4] || ''),
+        message: String(t[5] || ''),
+        date: String(t[0] || ''),
+        status: (t[6] === 'resolved' ? 'resolved' : 'open') as 'open' | 'resolved',
+      }));
+
+    let settings: CompanySettings | undefined = undefined;
+    if (pengaturanRows.length > 0) {
+      const sObj: any = {};
+      pengaturanRows.forEach((row) => {
+        const key = String(row[0] || '').trim();
+        const val = row[1];
+        if (key && key !== 'Key' && val !== undefined && val !== '') {
+          if (key === 'promos' || key === 'heroSlides') {
+            try {
+              sObj[key] = typeof val === 'string' ? JSON.parse(val) : val;
+            } catch {
+              sObj[key] = [];
+            }
+          } else if (key === 'qrisAutoVerify') {
+            sObj[key] = String(val) === 'true' || val === true;
+          } else {
+            sObj[key] = val;
+          }
+        }
+      });
+      if (Object.keys(sObj).length > 0) {
+        const cleaned = sanitizeSheetSettings({
+          ...DEFAULT_COMPANY_SETTINGS,
+          ...sObj,
+        });
+        delete (cleaned as any)._hadFormulaError;
+        settings = cleaned;
+      }
+    }
+
+    return { customers, tickets, settings };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchFromGoogleSheets(): Promise<{
+  customers: CustomerUser[];
+  tickets: SupportTicket[];
+  settings?: CompanySettings;
+  packages?: WifiPackage[];
+  coverage?: CoverageAreaItem[];
+} | null> {
+  const url = getGoogleSheetsWebhookUrl();
+  if (!url) return null;
+
+  const inCooldown = isWithinMutationCooldown();
+
+  const sheetId = extractSpreadsheetId(url);
+  if (sheetId && !isAppsScriptWebAppUrl(url)) {
+    const directData = await fetchDirectSpreadsheetGviz(sheetId);
+    if (directData) {
+      if (directData.customers.length > 0 && !inCooldown) saveLocalCustomers(directData.customers);
+      if (directData.tickets.length > 0 && !inCooldown) saveLocalTickets(directData.tickets);
+      if (directData.settings && !inCooldown) saveLocalSettings(directData.settings);
+      return directData;
+    }
+    return null;
+  }
+
+  try {
+    const separator = url.includes('?') ? '&' : '?';
+    const response = await fetch(`${url}${separator}action=get_all&t=${Date.now()}`, {
+      method: 'GET',
+      redirect: 'follow',
+    });
+
+    if (!response.ok) return null;
+    const data = await response.json();
+
+    if (data && data.status === 'success') {
+      const normalizedCustomers: CustomerUser[] =
+        !inCooldown && Array.isArray(data.customers) && data.customers.length > 0
+          ? data.customers.map((c: CustomerUser) => ({
+              ...c,
+              ktpImageUrl: normalizeGoogleDriveImageUrl(c.ktpImageUrl) || c.ktpImageUrl,
+              payments: Array.isArray(c.payments)
+                ? c.payments.map((p: PaymentRecord) => ({
+                    ...p,
+                    proofOfPaymentUrl:
+                      normalizeGoogleDriveImageUrl(p.proofOfPaymentUrl) || p.proofOfPaymentUrl,
+                  }))
+                : [],
+            }))
+          : getLocalCustomers();
+
+      const normalizedTickets: SupportTicket[] =
+        !inCooldown && Array.isArray(data.tickets) && data.tickets.length > 0
+          ? data.tickets.map((t: SupportTicket) => ({
+              ...t,
+              status: t.status === 'resolved' ? 'resolved' : 'open',
+            }))
+          : getLocalTickets();
+
+      if (Array.isArray(data.customers) && data.customers.length > 0 && !inCooldown) {
+        saveLocalCustomers(normalizedCustomers);
+      }
+      if (Array.isArray(data.tickets) && data.tickets.length > 0 && !inCooldown) {
+        saveLocalTickets(normalizedTickets);
+      }
+
+      let resolvedPackages: WifiPackage[] | undefined;
+      let resolvedCoverage: CoverageAreaItem[] | undefined;
+
+      if (Array.isArray(data.packages) && data.packages.length > 0 && !inCooldown) {
+        resolvedPackages = saveLocalPackages(data.packages, false);
+      }
+
+      if (Array.isArray(data.coverage) && data.coverage.length > 0 && !inCooldown) {
+        resolvedCoverage = saveLocalCoverage(data.coverage, false);
+      }
+
+      let normalizedSettings: CompanySettings | undefined = undefined;
+      if (data.settings && typeof data.settings === 'object' && !inCooldown) {
+        const currentLocal = getLocalSettings();
+        const rawSettings = sanitizeSheetSettings(data.settings);
+        const hadFormulaError = Boolean(rawSettings._hadFormulaError);
+        delete rawSettings._hadFormulaError;
+
+        // Parse packagesJson & coverageJson stored inside Pengaturan sheet if present
+        if (rawSettings.packagesJson && !resolvedPackages) {
+          try {
+            const parsedPkgs = JSON.parse(rawSettings.packagesJson);
+            if (Array.isArray(parsedPkgs) && parsedPkgs.length > 0) {
+              resolvedPackages = saveLocalPackages(parsedPkgs, false);
+            }
+          } catch {}
+        }
+
+        if (rawSettings.coverageJson && !resolvedCoverage) {
+          try {
+            const parsedCov = JSON.parse(rawSettings.coverageJson);
+            if (Array.isArray(parsedCov) && parsedCov.length > 0) {
+              resolvedCoverage = saveLocalCoverage(parsedCov, false);
+            }
+          } catch {}
+        }
+
+        const activeCov = getLocalCoverage();
+        const computedCovText =
+          activeCov && activeCov.length > 0
+            ? computeCoverageSummaryText(activeCov)
+            : rawSettings.coverageText || currentLocal.coverageText;
+
+        normalizedSettings = {
+          ...currentLocal,
+          ...rawSettings,
+          coverageText: computedCovText,
+          logoUrl:
+            normalizeGoogleDriveImageUrl(rawSettings.logoUrl) ||
+            currentLocal.logoUrl ||
+            DEFAULT_COMPANY_SETTINGS.logoUrl,
+          qrisUrl:
+            normalizeGoogleDriveImageUrl(rawSettings.qrisUrl) ||
+            currentLocal.qrisUrl ||
+            '',
+          promos: Array.isArray(rawSettings.promos)
+            ? rawSettings.promos.map((p: string) => normalizeGoogleDriveImageUrl(p) || p)
+            : currentLocal.promos || [],
+          heroSlides:
+            Array.isArray(rawSettings.heroSlides) && rawSettings.heroSlides.length > 0
+              ? rawSettings.heroSlides.map((s: string) => normalizeGoogleDriveImageUrl(s) || s)
+              : currentLocal.heroSlides || DEFAULT_HERO_SLIDES,
+        };
+        saveLocalSettings(normalizedSettings);
+
+        if (hadFormulaError) {
+          syncToGoogleSheets('update_settings', normalizedSettings).catch(() => {});
+        }
+      }
+
+      return {
+        customers: normalizedCustomers,
+        tickets: normalizedTickets,
+        settings: normalizedSettings || getLocalSettings(),
+        packages: resolvedPackages || getLocalPackages(),
+        coverage: resolvedCoverage || getLocalCoverage(),
+      };
+    }
+  } catch (err) {
+    console.warn('Direct Google Sheets fetch failed, using cached data:', err);
+  }
+  return null;
+}
+
+export async function syncToGoogleSheets(action: string, payload: any): Promise<any | null> {
+  const url = getGoogleSheetsWebhookUrl();
+  const bodyObj = {
+    action,
+    timestamp: new Date().toISOString(),
+    ...(payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}),
+    data: payload,
+  };
+  const bodyStr = JSON.stringify(bodyObj);
+
+  // Also notify local server webhook in background so server DB & SSE stay in sync across devices
+  try {
+    fetch('/api/dev/sheets/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, payload, customUrl: url }),
+    }).catch(() => {});
+  } catch {}
+
+  if (!url) return null;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: bodyStr,
+      redirect: 'follow',
+    });
+
+    if (response.ok) {
+      const resJson = await response.json();
+      return resJson;
+    }
+  } catch {
+    try {
+      await fetch(url, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8',
+        },
+        body: bodyStr,
+      });
+    } catch (innerErr) {
+      console.warn('Google Sheets background sync error:', innerErr);
+    }
+  }
+  return null;
+}
+
+// ==========================================
+// CUSTOMERS & TICKETS LOCAL HELPERS
+// ==========================================
+
+export function getLocalCustomers(): CustomerUser[] {
+  try {
+    const raw = localStorage.getItem(CUSTOMERS_STORAGE_KEY);
+    if (!raw) {
+      localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(INITIAL_FALLBACK_CUSTOMERS));
+      return INITIAL_FALLBACK_CUSTOMERS;
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_FALLBACK_CUSTOMERS;
+  } catch {
+    return INITIAL_FALLBACK_CUSTOMERS;
+  }
+}
+
+export function saveLocalCustomers(customers: CustomerUser[]) {
+  try {
+    localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(customers));
+  } catch (e) {
+    console.warn('Error saving local customers:', e);
   }
 }
 
 export function getLocalTickets(): SupportTicket[] {
   try {
-    const raw = localStorage.getItem(STORAGE_TICKETS_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
+    const raw = localStorage.getItem(TICKETS_STORAGE_KEY);
+    if (!raw) {
+      localStorage.setItem(TICKETS_STORAGE_KEY, JSON.stringify(INITIAL_FALLBACK_TICKETS));
+      return INITIAL_FALLBACK_TICKETS;
     }
-  } catch (e) {
-    console.warn('Failed to read local tickets:', e);
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : INITIAL_FALLBACK_TICKETS;
+  } catch {
+    return INITIAL_FALLBACK_TICKETS;
   }
-  return SEED_TICKETS;
 }
 
-export function saveLocalTickets(list: SupportTicket[]): void {
+export function saveLocalTickets(tickets: SupportTicket[]) {
   try {
-    localStorage.setItem(STORAGE_TICKETS_KEY, JSON.stringify(list));
+    localStorage.setItem(TICKETS_STORAGE_KEY, JSON.stringify(tickets));
   } catch (e) {
-    console.warn('Failed to save local tickets:', e);
+    console.warn('Error saving local tickets:', e);
   }
 }
 
-// Client-side authentication fallback (Guarantees login works on Vercel without active backend)
-export function authenticateLocally(email: string, password: string, isAdmin: boolean): {
-  success: boolean;
-  user?: any;
-  message?: string;
-} {
-  const cleanEmail = (email || '').trim().toLowerCase();
-  const cleanPass = (password || '').trim();
+export function addLocalTicket(newTicket: SupportTicket): SupportTicket[] {
+  markLocalMutation();
+  const current = getLocalTickets();
+  const exists = current.some((t) => t.id === newTicket.id);
+  const updated = exists
+    ? current.map((t) => (t.id === newTicket.id ? newTicket : t))
+    : [newTicket, ...current];
+  saveLocalTickets(updated);
 
-  // 1. Stealth Developer login check
-  if (cleanEmail === 'ajayrostaman@gmail.com' && cleanPass === 'pengelola123') {
-    return {
-      success: true,
-      user: {
-        isDeveloper: true,
-        name: 'Developer Utama',
-        email: 'ajayrostaman@gmail.com',
-      },
-    };
-  }
-
-  // 2. Admin login check
-  if (isAdmin) {
-    const validAdminEmails = ['admin@patasnet.id', 'admin@taranet.id', 'admin', 'admin@gmail.com'];
-    const validAdminPasswords = ['admin', 'admin123', 'admin@patasnet.id', 'patasnet', 'patas123'];
-    
-    if (validAdminEmails.includes(cleanEmail) && validAdminPasswords.includes(cleanPass)) {
-      return {
-        success: true,
-        user: { isAdmin: true, name: 'Administrator Patas Net', email: cleanEmail },
-      };
-    }
-    return {
-      success: false,
-      message: 'Kredensial Admin tidak valid. Gunakan email: admin@patasnet.id dan password: admin',
-    };
-  }
-
-  // 3. Customer login check
-  const customers = getLocalCustomers();
-  const customer = customers.find((c) => c.email.toLowerCase() === cleanEmail);
-
-  if (!customer) {
-    return {
-      success: false,
-      message: 'Alamat email pelanggan tidak terdaftar di database. Silakan daftar terlebih dahulu.',
-    };
-  }
-
-  // Accept demo passwords or stored passwords
-  const allowedPasswords = ['user123', 'budi123', 'dewi123', 'andi123', 'admin', '123456', 'budi', 'dewi', 'andi', 'patas123'];
-  // Also if password starts with the customer first name
-  const firstName = customer.name.split(' ')[0].toLowerCase();
-  allowedPasswords.push(firstName);
-  allowedPasswords.push(`${firstName}123`);
-
-  if (allowedPasswords.includes(cleanPass) || cleanPass.length >= 4) {
-    return {
-      success: true,
-      user: customer,
-    };
-  }
-
-  return {
-    success: false,
-    message: 'Password yang Anda masukkan salah.',
-  };
-}
-
-// Update payment status locally
-export function updateLocalPaymentStatus(customerId: string, paymentId: string, newStatus: 'paid' | 'unpaid' | 'pending_verification'): boolean {
-  const customers = getLocalCustomers();
-  let updated = false;
-  let updatedCustomer: CustomerUser | null = null;
-
-  const newCustomers = customers.map((c) => {
-    if (c.id === customerId) {
-      const newPayments = (c.payments || []).map((p) => {
-        if (p.id === paymentId) {
-          updated = true;
-          return { ...p, status: newStatus };
-        }
-        return p;
-      });
-      updatedCustomer = { ...c, payments: newPayments, status: newStatus === 'paid' ? 'active' : c.status };
-      return updatedCustomer;
-    }
-    return c;
-  });
-
-  if (updated) {
-    saveLocalCustomers(newCustomers);
-    if (newStatus === 'paid') {
-      syncToGoogleSheets('approve_payment', { customerId, paymentId });
-    }
-  }
-  return updated;
-}
-
-// Submit payment proof locally
-export function submitLocalPaymentProof(customerId: string, paymentId: string, proofUrl: string, method?: string): boolean {
-  const customers = getLocalCustomers();
-  let updated = false;
-  let updatedCustomer: CustomerUser | null = null;
-
-  const newCustomers = customers.map((c) => {
-    if (c.id === customerId) {
-      const newPayments = (c.payments || []).map((p) => {
-        if (p.id === paymentId) {
-          updated = true;
-          return {
-            ...p,
-            status: 'pending_verification' as const,
-            proofOfPaymentUrl: proofUrl,
-            method: method || p.method || 'Transfer Bank',
-          };
-        }
-        return p;
-      });
-      updatedCustomer = { ...c, payments: newPayments };
-      return updatedCustomer;
-    }
-    return c;
-  });
-
-  if (updated) {
-    saveLocalCustomers(newCustomers);
-    syncToGoogleSheets('submit_payment_proof', {
-      userId: customerId,
-      paymentId,
-      proofBase64: proofUrl,
-      method: method || 'Transfer Bank',
+  // Also attach to customer's embedded tickets array if present
+  if (newTicket.userId || newTicket.email) {
+    const custs = getLocalCustomers().map((c) => {
+      if (
+        (newTicket.userId && c.id === newTicket.userId) ||
+        (newTicket.email && c.email.toLowerCase() === newTicket.email.toLowerCase())
+      ) {
+        const prevTickets = Array.isArray(c.tickets) ? c.tickets : [];
+        const hasTicket = prevTickets.some((t) => t.id === newTicket.id);
+        return {
+          ...c,
+          tickets: hasTicket
+            ? prevTickets.map((t) => (t.id === newTicket.id ? newTicket : t))
+            : [newTicket, ...prevTickets],
+        };
+      }
+      return c;
     });
+    saveLocalCustomers(custs);
   }
+
+  broadcastDataUpdate('tickets');
   return updated;
 }
 
-// Instant QRIS payment confirmation without requiring proof receipt upload
-export function submitLocalQrisPayment(customerId: string, paymentId: string, autoVerify = true): boolean {
-  const customers = getLocalCustomers();
-  let updated = false;
-  let updatedCustomer: CustomerUser | null = null;
-  const txId = `QRIS-${Math.floor(100000 + Math.random() * 900000)}`;
+export function updateLocalTicketStatus(
+  ticketId: string,
+  status: 'open' | 'resolved'
+): SupportTicket[] {
+  markLocalMutation();
+  const current = getLocalTickets();
+  const updated = current.map((t) => (t.id === ticketId ? { ...t, status } : t));
+  saveLocalTickets(updated);
 
-  const newCustomers = customers.map((c) => {
-    if (c.id === customerId) {
-      const newPayments = (c.payments || []).map((p) => {
-        if (p.id === paymentId) {
-          updated = true;
-          return {
-            ...p,
-            status: (autoVerify ? 'paid' : 'pending_verification') as any,
-            method: 'QRIS',
-            transactionId: txId,
-            date: new Date().toISOString().substring(0, 10),
-          };
-        }
-        return p;
-      });
-      // Also automatically set customer to active if they were pending
-      updatedCustomer = {
-        ...c,
-        status: (c.status === 'pending' && autoVerify ? 'active' : c.status) as any,
-        payments: newPayments,
-      };
-      return updatedCustomer;
-    }
-    return c;
+  // Also update inside customers' embedded tickets array
+  const custs = getLocalCustomers().map((c) => {
+    if (!Array.isArray(c.tickets) || c.tickets.length === 0) return c;
+    return {
+      ...c,
+      tickets: c.tickets.map((t) => (t.id === ticketId ? { ...t, status } : t)),
+    };
   });
+  saveLocalCustomers(custs);
 
-  if (updated) {
-    saveLocalCustomers(newCustomers);
-    syncToGoogleSheets('approve_payment', {
-      userId: customerId,
-      paymentId,
-      method: 'QRIS',
-      transactionId: txId,
-    });
-  }
+  syncToGoogleSheets('update_ticket_status', { id: ticketId, status }).catch(() => {});
+  broadcastDataUpdate('tickets');
   return updated;
 }
 
-// Update customer status locally
-export function updateLocalCustomerStatus(customerId: string, status: 'pending' | 'active' | 'suspended'): boolean {
-  const customers = getLocalCustomers();
-  let updated = false;
-  let updatedCustomer: CustomerUser | null = null;
-
-  const newCustomers = customers.map((c) => {
-    if (c.id === customerId) {
-      updated = true;
-      updatedCustomer = { ...c, status };
-      return updatedCustomer;
-    }
-    return c;
-  });
-
-  if (updated) {
-    saveLocalCustomers(newCustomers);
-    syncToGoogleSheets('update_status', { id: customerId, status });
-  }
+export function addLocalCustomer(newCustomer: CustomerUser): CustomerUser[] {
+  markLocalMutation();
+  const current = getLocalCustomers();
+  const exists = current.some((c) => c.id === newCustomer.id || c.email === newCustomer.email);
+  const updated = exists
+    ? current.map((c) => (c.id === newCustomer.id ? newCustomer : c))
+    : [newCustomer, ...current];
+  saveLocalCustomers(updated);
+  broadcastDataUpdate('customers');
   return updated;
 }
 
-// Add newly registered customer locally
-export function addLocalCustomer(customer: CustomerUser): void {
-  const customers = getLocalCustomers();
-  const existingIdx = customers.findIndex((c) => c.id === customer.id || c.email === customer.email);
-  if (existingIdx >= 0) {
-    customers[existingIdx] = customer;
-  } else {
-    customers.unshift(customer);
-  }
-  saveLocalCustomers(customers);
-
-  // Sync to Google Sheets & Google Drive
-  syncToGoogleSheets('subscribe', {
-    id: customer.id,
-    name: customer.name,
-    email: customer.email,
-    phone: customer.phone,
-    address: customer.address,
-    coordinates: customer.coordinates,
-    packageId: customer.packageId,
-    status: customer.status,
-    ktpImageBase64: customer.ktpImageUrl,
-  });
+export function deleteLocalCustomer(id: string): CustomerUser[] {
+  markLocalMutation();
+  const current = getLocalCustomers();
+  const updated = current.filter((c) => c.id !== id);
+  saveLocalCustomers(updated);
+  syncToGoogleSheets('delete_customer', { id }).catch(() => {});
+  broadcastDataUpdate('customers');
+  return updated;
 }
 
-// Request password reset link (Simulates the flow by updating the user's status in local storage)
+export function updateLocalCustomerStatus(
+  id: string,
+  status: 'pending' | 'active' | 'suspended'
+): CustomerUser[] {
+  markLocalMutation();
+  const current = getLocalCustomers();
+  const updated = current.map((c) => (c.id === id ? { ...c, status } : c));
+  saveLocalCustomers(updated);
+  syncToGoogleSheets('update_status', { id, status });
+  broadcastDataUpdate('customers');
+  return updated;
+}
+
 export function requestPasswordResetLocally(email: string): {
-  success: boolean;
-  message: string;
+  found: boolean;
   user?: CustomerUser;
   resetLink?: string;
 } {
-  const cleanEmail = (email || '').trim().toLowerCase();
-  if (!cleanEmail) {
-    return { success: false, message: 'Harap masukkan alamat email Anda.' };
+  const cleanEmail = email.trim().toLowerCase();
+  const current = getLocalCustomers();
+  const target = current.find((c) => c.email.trim().toLowerCase() === cleanEmail);
+  if (!target) {
+    return { found: false };
   }
 
-  const customers = getLocalCustomers();
-  let index = customers.findIndex((c) => c.email.toLowerCase() === cleanEmail);
-
-  // Generate simulated reset token & link
-  const token = 'rst_' + Math.random().toString(36).substring(2, 10);
-  const resetLink = `${window.location.origin}/?mode=reset-password&email=${encodeURIComponent(cleanEmail)}&token=${token}`;
-
-  let target: CustomerUser;
-  if (index === -1) {
-    // If not found in default list, create/simulate user record so testing with any email works smoothly
-    target = {
-      id: 'cust-' + Math.random().toString(36).substring(2, 9),
-      name: cleanEmail.split('@')[0],
-      email: cleanEmail,
-      phone: '081234567890',
-      address: 'Alamat Pelanggan',
-      coordinates: [-6.2088, 106.8456],
-      packageId: 'home-20m',
-      status: 'pending',
-      payments: [],
-      createdAt: new Date().toISOString(),
-    };
-    customers.push(target);
-    index = customers.length - 1;
-  } else {
-    target = customers[index];
-  }
-
-  // Update the user's status in local storage to simulate the workflow
-  const updatedCustomer: CustomerUser = {
+  const resetToken = `RST-${Math.floor(100000 + Math.random() * 900000)}`;
+  const nowIso = new Date().toISOString();
+  const updatedUser: CustomerUser = {
     ...target,
-    status: 'pending', // Simulating the flow by updating user's status in local storage
+    status: 'pending',
     passwordResetRequested: true,
-    resetRequestedAt: new Date().toISOString(),
-    resetToken: token,
+    resetRequestedAt: nowIso,
+    resetToken,
   };
 
-  customers[index] = updatedCustomer;
-  saveLocalCustomers(customers);
+  const updatedList = current.map((c) => (c.id === target.id ? updatedUser : c));
+  saveLocalCustomers(updatedList);
+  syncToGoogleSheets('update_status', {
+    id: target.id,
+    status: 'pending',
+    passwordResetRequested: true,
+    resetToken,
+  });
 
-  // Store password reset request metadata and status in local storage
-  try {
-    localStorage.setItem('user_status', 'pending');
-    localStorage.setItem('currentUserStatus', 'pending');
-    localStorage.setItem(`user_status_${cleanEmail}`, 'pending');
-    localStorage.setItem(
-      `patasnet_reset_${cleanEmail}`,
-      JSON.stringify({
-        email: cleanEmail,
-        userId: updatedCustomer.id,
-        name: updatedCustomer.name,
-        previousStatus: target.status,
-        updatedStatus: 'pending',
-        resetToken: token,
-        resetLink,
-        requestedAt: new Date().toISOString(),
-      })
-    );
-  } catch {}
-
-  // Sync to sheets or server if available
-  try {
-    fetch('/api/auth/forgot-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: cleanEmail }),
-    }).catch(() => {});
-  } catch {}
-
+  const resetLink = `${window.location.origin}/?reset_token=${resetToken}&email=${encodeURIComponent(target.email)}`;
   return {
-    success: true,
-    message: `Tautan reset password berhasil dikirim ke ${cleanEmail}. Status akun berhasil diperbarui di penyimpanan lokal (Status: PENDING - Menunggu Reset).`,
-    user: updatedCustomer,
+    found: true,
+    user: updatedUser,
     resetLink,
   };
 }
 
-// Complete password reset simulation locally
-export function resetCustomerPasswordLocally(email: string, _newPassword?: string): boolean {
-  const cleanEmail = (email || '').trim().toLowerCase();
-  const customers = getLocalCustomers();
-  const index = customers.findIndex((c) => c.email.toLowerCase() === cleanEmail);
+export function resetCustomerPasswordLocally(
+  email: string,
+  newPassword: string
+): CustomerUser | null {
+  const cleanEmail = email.trim().toLowerCase();
+  const current = getLocalCustomers();
+  let updatedUser: CustomerUser | null = null;
 
-  if (index !== -1) {
-    customers[index] = {
-      ...customers[index],
-      status: 'active', // Restores user to active status after reset
-      passwordResetRequested: false,
-      resetToken: undefined,
+  const updatedList = current.map((c) => {
+    if (c.email.trim().toLowerCase() === cleanEmail) {
+      updatedUser = {
+        ...c,
+        status: 'active',
+        passwordResetRequested: false,
+        resetToken: undefined,
+        ...(newPassword ? ({ customPassword: newPassword } as any) : {}),
+      };
+      return updatedUser;
+    }
+    return c;
+  });
+
+  if (updatedUser) {
+    saveLocalCustomers(updatedList);
+    syncToGoogleSheets('update_status', { id: (updatedUser as CustomerUser).id, status: 'active' });
+  }
+  return updatedUser;
+}
+
+export function updateLocalPaymentStatus(
+  userId: string,
+  paymentId: string,
+  status: 'unpaid' | 'pending_verification' | 'paid',
+  txId?: string
+): CustomerUser[] {
+  markLocalMutation();
+  const current = getLocalCustomers();
+  const transactionId = txId || (status === 'paid' ? `TX-${Math.floor(88001000 + Math.random() * 9000)}` : undefined);
+
+  const updated = current.map((c) => {
+    if (c.id !== userId) return c;
+    const payments = (c.payments || []).map((p): PaymentRecord => {
+      if (p.id !== paymentId) return p;
+      return {
+        ...p,
+        status,
+        transactionId: transactionId || p.transactionId,
+      };
+    });
+    const newCustomerStatus = status === 'paid' && c.status === 'pending' ? 'active' : c.status;
+    return { ...c, status: newCustomerStatus, payments };
+  });
+
+  saveLocalCustomers(updated);
+  syncToGoogleSheets('verify_payment', { userId, paymentId, status, transactionId });
+  broadcastDataUpdate('customers');
+  return updated;
+}
+
+export function submitLocalPaymentProof(
+  userId: string,
+  paymentId: string,
+  proofUrl: string,
+  method = 'Transfer Bank'
+): CustomerUser | null {
+  markLocalMutation();
+  const current = getLocalCustomers();
+  let targetUser: CustomerUser | null = null;
+  const nowStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
+  const updated = current.map((c) => {
+    if (c.id !== userId) return c;
+    const payments = (c.payments || []).map((p): PaymentRecord => {
+      if (p.id !== paymentId) return p;
+      return {
+        ...p,
+        status: 'pending_verification',
+        proofOfPaymentUrl: proofUrl,
+        method,
+        date: nowStr,
+      };
+    });
+    targetUser = { ...c, payments };
+    return targetUser;
+  });
+
+  saveLocalCustomers(updated);
+
+  syncToGoogleSheets('submit_payment_proof', {
+    userId,
+    paymentId,
+    customerName: targetUser ? (targetUser as CustomerUser).name : '',
+    proofBase64: proofUrl,
+    method,
+    date: nowStr,
+  }).then((res) => {
+    if (res && res.driveProofUrl) {
+      const latest = getLocalCustomers().map((c) => {
+        if (c.id !== userId) return c;
+        return {
+          ...c,
+          payments: (c.payments || []).map((p) =>
+            p.id === paymentId ? { ...p, proofOfPaymentUrl: res.driveProofUrl } : p
+          ),
+        };
+      });
+      saveLocalCustomers(latest);
+    }
+  });
+
+  broadcastDataUpdate('customers');
+  return targetUser;
+}
+
+export function submitLocalQrisPayment(
+  userId: string,
+  paymentId: string,
+  autoApprove = true
+): CustomerUser | null {
+  markLocalMutation();
+  const current = getLocalCustomers();
+  let targetUser: CustomerUser | null = null;
+  const nowStr = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  const txId = `QRIS-${Math.floor(100000 + Math.random() * 900000)}`;
+  const newPaymentStatus: 'paid' | 'pending_verification' = autoApprove ? 'paid' : 'pending_verification';
+
+  const updated = current.map((c) => {
+    if (c.id !== userId) return c;
+    const payments = (c.payments || []).map((p): PaymentRecord => {
+      if (p.id !== paymentId) return p;
+      return {
+        ...p,
+        status: newPaymentStatus,
+        method: 'QRIS',
+        transactionId: txId,
+        date: nowStr,
+      };
+    });
+    const newCustomerStatus = autoApprove && c.status === 'pending' ? 'active' : c.status;
+    targetUser = { ...c, status: newCustomerStatus, payments };
+    return targetUser;
+  });
+
+  saveLocalCustomers(updated);
+
+  syncToGoogleSheets('qris_payment', {
+    userId,
+    paymentId,
+    customerName: targetUser ? (targetUser as CustomerUser).name : '',
+    method: 'QRIS',
+    status: newPaymentStatus,
+    transactionId: txId,
+    date: nowStr,
+  });
+
+  broadcastDataUpdate('customers');
+  return targetUser;
+}
+
+export function authenticateLocally(
+  email: string,
+  password: string,
+  isAdmin: boolean
+): { ok: boolean; user?: any; message?: string } {
+  const cleanEmail = email.trim().toLowerCase();
+
+  if (isAdmin) {
+    const validAdminEmails = ['admin@patasnet.id', 'admin@taranet.id', 'admin', 'admin@gmail.com'];
+    const validAdminPasswords = ['admin', 'admin123', 'admin@patasnet.id', 'patasnet'];
+    if (validAdminEmails.includes(cleanEmail) && validAdminPasswords.includes(password)) {
+      return {
+        ok: true,
+        user: { isAdmin: true, email: cleanEmail, name: 'Administrator Patas Net' },
+      };
+    }
+    return {
+      ok: false,
+      message: 'Kredensial Admin tidak valid. Gunakan email: admin@patasnet.id dan password: admin',
     };
-    saveLocalCustomers(customers);
   }
 
-  try {
-    localStorage.setItem('user_status', 'active');
-    localStorage.setItem('currentUserStatus', 'active');
-    localStorage.setItem(`user_status_${cleanEmail}`, 'active');
-    localStorage.removeItem(`patasnet_reset_${cleanEmail}`);
-  } catch {}
+  const customers = getLocalCustomers();
+  const customer = customers.find((c) => c.email.trim().toLowerCase() === cleanEmail);
+  if (!customer) {
+    return {
+      ok: false,
+      message: 'Alamat email pelanggan tidak ditemukan. Gunakan budi@gmail.com (password: user123) untuk demo.',
+    };
+  }
 
-  return true;
+  const customPass = (customer as any).customPassword;
+  if (customPass && password === customPass) {
+    return { ok: true, user: customer };
+  }
+
+  const validPasswords = ['user123', 'budi123', 'dewi123', 'andi123', 'admin', '123456'];
+  if (validPasswords.includes(password) || password.length >= 4) {
+    return { ok: true, user: customer };
+  }
+
+  return { ok: false, message: 'Password yang Anda masukkan salah.' };
 }

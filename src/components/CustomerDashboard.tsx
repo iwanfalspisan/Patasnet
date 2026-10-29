@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Wifi,
   CreditCard,
@@ -32,12 +32,19 @@ import { PACKAGES } from './Home';
 import { jsPDF } from 'jspdf';
 import { generateCustomerPDFReport } from '../lib/pdfGenerator';
 import ImagePreviewModal from './ImagePreviewModal';
-import { submitLocalPaymentProof, submitLocalQrisPayment, syncToGoogleSheets } from '../lib/clientFallback';
+import {
+  submitLocalPaymentProof,
+  submitLocalQrisPayment,
+  syncToGoogleSheets,
+  getLocalTickets,
+  addLocalTicket,
+} from '../lib/clientFallback';
 import { generateDefaultQrisSvg } from '../lib/qrisUtils';
 import Logo from './Logo';
 
 interface CustomerDashboardProps {
   user: CustomerUser;
+  supportTickets?: SupportTicket[];
   onRefreshUser: () => void;
   onLogout: () => void;
   companyName?: string;
@@ -47,6 +54,7 @@ interface CustomerDashboardProps {
 
 export default function CustomerDashboard({
   user,
+  supportTickets = [],
   onRefreshUser,
   onLogout,
   companyName,
@@ -58,6 +66,50 @@ export default function CustomerDashboard({
   const [ticketMessage, setTicketMessage] = useState('');
   const [submittingTicket, setSubmittingTicket] = useState(false);
   const [ticketSuccess, setTicketSuccess] = useState(false);
+  const [localTicketsState, setLocalTicketsState] = useState<SupportTicket[]>(() => getLocalTickets());
+
+  useEffect(() => {
+    const syncTickets = () => {
+      setLocalTicketsState(getLocalTickets());
+    };
+    window.addEventListener('patasnet:data-updated', syncTickets);
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        bc = new BroadcastChannel('patasnet_sync');
+        bc.onmessage = () => syncTickets();
+      }
+    } catch {}
+    return () => {
+      window.removeEventListener('patasnet:data-updated', syncTickets);
+      if (bc) bc.close();
+    };
+  }, []);
+
+  // Merge tickets from props, user.tickets, and localStorage for this customer
+  const customerTickets: SupportTicket[] = React.useMemo(() => {
+    const map = new Map<string, SupportTicket>();
+    const allSources = [
+      ...(Array.isArray(user?.tickets) ? user.tickets : []),
+      ...(Array.isArray(supportTickets) ? supportTickets : []),
+      ...(Array.isArray(localTicketsState) ? localTicketsState : []),
+    ];
+    allSources.forEach((t) => {
+      if (!t || !t.id) return;
+      const matchesUser =
+        (t.userId && t.userId === user.id) ||
+        (t.email && user.email && t.email.toLowerCase() === user.email.toLowerCase()) ||
+        (t.phone && user.phone && t.phone.replace(/\D/g, '') === user.phone.replace(/\D/g, '')) ||
+        (t.userName && user.name && t.userName.trim().toLowerCase() === user.name.trim().toLowerCase());
+      if (matchesUser) {
+        map.set(t.id, t);
+      }
+    });
+    return Array.from(map.values());
+  }, [user, supportTickets, localTicketsState]);
+
+  const openCustomerTickets = customerTickets.filter((t) => t.status !== 'resolved');
+  const resolvedCustomerTickets = customerTickets.filter((t) => t.status === 'resolved');
 
   // Payment states
   const [selectedPayment, setSelectedPayment] = useState<PaymentRecord | null>(null);
@@ -93,7 +145,7 @@ export default function CustomerDashboard({
 
     setSubmittingTicket(true);
     const newTicket: SupportTicket = {
-      id: `TKT-${Math.floor(100 + Math.random() * 900)}`,
+      id: `TCK-${Math.floor(5000 + Math.random() * 9000)}`,
       userId: user.id,
       userName: user.name,
       email: user.email,
@@ -102,7 +154,9 @@ export default function CustomerDashboard({
       status: 'open',
       date: new Date().toISOString().replace('T', ' ').substring(0, 16),
     };
-    syncToGoogleSheets('submit_ticket', newTicket).catch(() => {});
+    addLocalTicket(newTicket);
+    setLocalTicketsState(getLocalTickets());
+    syncToGoogleSheets('create_ticket', newTicket).catch(() => {});
 
     try {
       const response = await fetch('/api/support', {
@@ -118,6 +172,15 @@ export default function CustomerDashboard({
       });
 
       if (response.ok) {
+        const resData = await response.json().catch(() => null);
+        if (resData?.ticket) {
+          addLocalTicket(resData.ticket);
+          setLocalTicketsState(getLocalTickets());
+        }
+        setTicketSuccess(true);
+        setTicketMessage('');
+        onRefreshUser();
+      } else {
         setTicketSuccess(true);
         setTicketMessage('');
       }
@@ -416,10 +479,10 @@ export default function CustomerDashboard({
         </div>
       </div>
 
-      {/* Main Layout Container with Left Sidebar */}
+      {/* Main Layout Container with Left Sidebar (Hidden on Mobile, replaced by Bottom Bar) */}
       <div className="flex flex-col lg:flex-row gap-6 relative">
-        {/* Left Sidebar Menu (Collapses to icon-only rail when hidden) */}
-        <aside className={`shrink-0 transition-all duration-300 lg:sticky lg:top-20 h-fit ${isSidebarOpen ? 'w-full lg:w-64' : 'w-full lg:w-20'}`}>
+        {/* Left Sidebar Menu (Desktop Only - Mobile uses Fixed Bottom App Bar) */}
+        <aside className={`hidden lg:block shrink-0 transition-all duration-300 lg:sticky lg:top-20 h-fit ${isSidebarOpen ? 'w-full lg:w-64' : 'w-full lg:w-20'}`}>
           <div className={`bg-white rounded-3xl border border-slate-200/80 shadow-md flex flex-col transition-all duration-300 ${isSidebarOpen ? 'p-5 gap-4' : 'p-3 gap-3 items-center'}`}>
             <div className={`flex items-center ${isSidebarOpen ? 'justify-between pb-3.5 border-b border-slate-100 w-full gap-2' : 'justify-center pb-2.5 border-b border-slate-100 w-full'}`}>
               {isSidebarOpen ? (
@@ -498,9 +561,9 @@ export default function CustomerDashboard({
                 type="button"
                 onClick={() => setActiveTab('tickets')}
                 title="Lapor Gangguan / Tiket CS"
-                className={`rounded-xl font-bold transition-all ${
+                className={`rounded-xl font-bold transition-all relative ${
                   isSidebarOpen
-                    ? 'w-full text-left flex items-center gap-2.5 px-3.5 py-2.5'
+                    ? 'w-full text-left flex items-center justify-between px-3.5 py-2.5'
                     : 'flex items-center justify-center p-3 text-center'
                 } ${
                   activeTab === 'tickets'
@@ -508,8 +571,29 @@ export default function CustomerDashboard({
                     : 'text-slate-600 hover:text-blue-600 hover:bg-slate-50'
                 }`}
               >
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                {isSidebarOpen && <span>Lapor Gangguan</span>}
+                <div className="flex items-center gap-2.5">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  {isSidebarOpen && <span>Lapor Gangguan</span>}
+                </div>
+                {customerTickets.length > 0 && (
+                  isSidebarOpen ? (
+                    <span
+                      className={`px-1.5 py-0.5 rounded-full text-[9px] font-extrabold ${
+                        openCustomerTickets.length > 0
+                          ? 'bg-amber-500 text-white'
+                          : 'bg-emerald-500 text-white'
+                      }`}
+                    >
+                      {openCustomerTickets.length > 0 ? openCustomerTickets.length : '✓'}
+                    </span>
+                  ) : (
+                    <span
+                      className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ring-2 ring-white ${
+                        openCustomerTickets.length > 0 ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'
+                      }`}
+                    />
+                  )
+                )}
               </button>
 
               <button
@@ -534,13 +618,74 @@ export default function CustomerDashboard({
         </aside>
 
         {/* Right Main Panel */}
-        <div className="flex-1 min-w-0 space-y-6">
+        <div key={activeTab} className="tab-transition flex-1 min-w-0 space-y-6">
 
       {/* ========================================================================= */}
       {/* TAB 1: BERANDA (OVERVIEW) */}
       {/* ========================================================================= */}
       {activeTab === 'home' && (
         <div className="space-y-6 animate-in fade-in duration-200">
+          {/* Support Ticket Resolved / Open Notification Banner */}
+          {resolvedCustomerTickets.length > 0 && openCustomerTickets.length === 0 && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-3xl p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-2xs">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 bg-emerald-600 text-white rounded-2xl shrink-0 mt-0.5">
+                  <CheckCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-extrabold text-sm text-emerald-950">
+                      Laporan Gangguan Anda Telah Selesai Diperbaiki!
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase bg-emerald-200 text-emerald-900">
+                      Selesai ({resolvedCustomerTickets[0].id})
+                    </span>
+                  </div>
+                  <p className="text-xs text-emerald-800 mt-0.5 leading-relaxed">
+                    Kendala: <em>"{resolvedCustomerTickets[0].message}"</em> — Tim teknisi kami telah menyelesaikan perbaikan. Silakan periksa kembali koneksi WiFi Anda.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('tickets')}
+                className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition shrink-0 text-center"
+              >
+                Lihat Detail Tiket &rarr;
+              </button>
+            </div>
+          )}
+
+          {openCustomerTickets.length > 0 && (
+            <div className="bg-blue-50 border border-blue-200 rounded-3xl p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-2xs">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 bg-blue-600 text-white rounded-2xl shrink-0 mt-0.5">
+                  <Clock className="w-5 h-5 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-extrabold text-sm text-blue-950">
+                      Tiket Gangguan Sedang Ditangani Teknisi ({openCustomerTickets.length} Laporan Aktif)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase bg-amber-100 text-amber-800 border border-amber-200">
+                      Dalam Penanganan
+                    </span>
+                  </div>
+                  <p className="text-xs text-blue-800 mt-0.5 leading-relaxed">
+                    Kendala: <em>"{openCustomerTickets[0].message}"</em> — Status akan otomatis berubah menjadi <strong>Selesai</strong> ketika perbaikan tuntas.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('tickets')}
+                className="w-full sm:w-auto px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs transition shrink-0 text-center"
+              >
+                Pantau Status &rarr;
+              </button>
+            </div>
+          )}
+
           {/* Unpaid Bill Alert Banner if any */}
           {unpaidBills.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-3xl p-5 sm:p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -1097,9 +1242,90 @@ export default function CustomerDashboard({
             <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-1.5 text-xs text-slate-600">
               <strong className="text-slate-800 block">Layanan Darurat 24 Jam:</strong>
               <p className="text-[11px] text-slate-500">
-                Hubungi Call Center WhatsApp kami di <strong className="text-blue-600">0812-3456-7890</strong> apabila ada kendala kabel fiber optik putus akibat pohon tumbang.
+                Hubungi Call Center WhatsApp kami di <strong className="text-blue-600">{companySettings?.whatsappNumber || '0812-3456-7890'}</strong> apabila ada kendala kabel fiber optik putus akibat pohon tumbang.
               </p>
             </div>
+          </div>
+
+          {/* Riwayat & Status Tiket Gangguan Pelanggan */}
+          <div className="bg-white rounded-3xl border border-slate-200/80 shadow-md p-6 sm:p-8 space-y-5 max-w-2xl mx-auto">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-blue-600" />
+                  Riwayat & Status Laporan Gangguan Anda
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Pantau secara langsung apakah laporan gangguan WiFi Anda sedang ditangani atau sudah selesai diperbaiki.
+                </p>
+              </div>
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-slate-700 font-extrabold text-[10px]">
+                Total: {customerTickets.length} Laporan
+              </span>
+            </div>
+
+            {customerTickets.length > 0 ? (
+              <div className="space-y-3">
+                {customerTickets.map((t) => {
+                  const isResolved = t.status === 'resolved';
+                  return (
+                    <div
+                      key={t.id}
+                      className={`p-4 rounded-2xl border transition ${
+                        isResolved
+                          ? 'bg-emerald-50/60 border-emerald-200'
+                          : 'bg-amber-50/50 border-amber-200'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] font-extrabold px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-700">
+                            {t.id}
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-medium">{t.date}</span>
+                        </div>
+
+                        {isResolved ? (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase bg-emerald-600 text-white shadow-2xs">
+                            <CheckCircle className="w-3.5 h-3.5" />
+                            Selesai Diperbaiki
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase bg-amber-500 text-white shadow-2xs animate-pulse">
+                            <Clock className="w-3.5 h-3.5" />
+                            Sedang Ditangani Teknisi
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="text-xs font-bold text-slate-800 leading-relaxed mb-2">
+                        "{t.message}"
+                      </p>
+
+                      {isResolved ? (
+                        <div className="flex items-start gap-2 pt-2 border-t border-emerald-200/70 text-[11px] text-emerald-800">
+                          <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                          <span>
+                            <strong>Gangguan Selesai:</strong> Laporan kendala ini telah selesai diperbaiki oleh tim teknisi {companyName || companySettings?.name || 'Patas.Net'}. Silakan gunakan kembali layanan internet Anda.
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex items-start gap-2 pt-2 border-t border-amber-200/70 text-[11px] text-amber-800">
+                          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <span>
+                            <strong>Dalam Penanganan:</strong> Tim teknisi kami sedang menindaklanjuti laporan Anda. Status akan berubah menjadi <strong>Selesai Diperbaiki</strong> setelah kendala teratasi.
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="py-8 text-center text-slate-400 text-xs font-semibold bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                Belum ada riwayat laporan gangguan pada akun Anda. Koneksi internet Anda terpantau normal.
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1209,14 +1435,14 @@ export default function CustomerDashboard({
       {/* ========================================================================= */}
       {/* MOBILE BOTTOM NAVIGATION BAR (APP-LIKE MOBILE EXPERIENCE) */}
       {/* ========================================================================= */}
-      <nav className="fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-2xl py-2 px-3 flex justify-around items-center md:hidden">
+      <nav className="fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-lg border-t border-slate-200/90 shadow-[0_-8px_25px_-5px_rgba(15,23,42,0.12)] py-1.5 px-2 flex justify-around items-center lg:hidden">
         <button
           type="button"
           onClick={() => setActiveTab('home')}
-          className={`flex flex-col items-center justify-center gap-1 py-1.5 px-3 rounded-2xl transition-all ${
+          className={`flex flex-col items-center justify-center gap-0.5 py-1.5 px-3 rounded-2xl transition-all active:scale-95 ${
             activeTab === 'home'
-              ? 'text-blue-600 font-black'
-              : 'text-slate-400 hover:text-slate-600'
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
           }`}
         >
           <Home className="w-5 h-5" />
@@ -1226,10 +1452,10 @@ export default function CustomerDashboard({
         <button
           type="button"
           onClick={() => setActiveTab('pay')}
-          className={`relative flex flex-col items-center justify-center gap-1 py-1.5 px-3 rounded-2xl transition-all ${
+          className={`relative flex flex-col items-center justify-center gap-0.5 py-1.5 px-3 rounded-2xl transition-all active:scale-95 ${
             activeTab === 'pay'
-              ? 'text-blue-600 font-black'
-              : 'text-slate-400 hover:text-slate-600'
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
           }`}
         >
           <CreditCard className="w-5 h-5" />
@@ -1242,23 +1468,30 @@ export default function CustomerDashboard({
         <button
           type="button"
           onClick={() => setActiveTab('tickets')}
-          className={`flex flex-col items-center justify-center gap-1 py-1.5 px-3 rounded-2xl transition-all ${
+          className={`relative flex flex-col items-center justify-center gap-0.5 py-1.5 px-3 rounded-2xl transition-all active:scale-95 ${
             activeTab === 'tickets'
-              ? 'text-blue-600 font-black'
-              : 'text-slate-400 hover:text-slate-600'
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
           }`}
         >
           <AlertCircle className="w-5 h-5" />
-          <span className="text-[10px]">Lapor</span>
+          <span className="text-[10px]">Gangguan</span>
+          {customerTickets.length > 0 && (
+            <span
+              className={`absolute top-1 right-2 w-2.5 h-2.5 rounded-full ring-2 ring-white ${
+                openCustomerTickets.length > 0 ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'
+              }`}
+            />
+          )}
         </button>
 
         <button
           type="button"
           onClick={() => setActiveTab('profile')}
-          className={`flex flex-col items-center justify-center gap-1 py-1.5 px-3 rounded-2xl transition-all ${
+          className={`flex flex-col items-center justify-center gap-0.5 py-1.5 px-3 rounded-2xl transition-all active:scale-95 ${
             activeTab === 'profile'
-              ? 'text-blue-600 font-black'
-              : 'text-slate-400 hover:text-slate-600'
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
           }`}
         >
           <User className="w-5 h-5" />

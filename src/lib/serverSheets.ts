@@ -459,7 +459,7 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
     db.sheets.Pembayaran = db.sheets.Pembayaran.filter((r) => String(r[2]) !== custId);
     db.sheets.Tiket = db.sheets.Tiket.filter((r) => String(r[2]) !== custId);
     saveGoogleSheetsDatabase(db);
-  } else if (action === 'create_ticket') {
+  } else if (action === 'create_ticket' || action === 'submit_ticket') {
     const ticketId = payload.id || `TCK-${Math.floor(5000 + Math.random() * 9000)}`;
     const exists = db.sheets.Tiket.some((t) => String(t[1]) === String(ticketId));
     if (!exists) {
@@ -474,6 +474,14 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
       ]);
       saveGoogleSheetsDatabase(db);
     }
+  } else if (action === 'update_ticket_status') {
+    for (let i = 0; i < db.sheets.Tiket.length; i++) {
+      if (String(db.sheets.Tiket[i][1]) === String(payload.id)) {
+        db.sheets.Tiket[i][6] = payload.status === 'resolved' ? 'resolved' : 'open';
+        break;
+      }
+    }
+    saveGoogleSheetsDatabase(db);
   } else if (action === 'update_settings' || action === 'update_logo' || action === 'update_qris') {
     const sanitized = sanitizeSheetSettings({ ...payload });
     delete sanitized._hadFormulaError;
@@ -506,6 +514,10 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
       'qrisAutoVerify',
       'qrisInstructions',
       'promos',
+      'heroSlides',
+      'packagesJson',
+      'coverageJson',
+      'whatsappConfigJson',
     ];
     keys.forEach((key) => {
       if (sanitized[key] !== undefined && sanitized[key] !== null) {
@@ -513,7 +525,7 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
           return;
         }
         const serializedVal =
-          key === 'promos' && Array.isArray(sanitized[key])
+          (key === 'promos' || key === 'heroSlides') && Array.isArray(sanitized[key])
             ? JSON.stringify(sanitized[key])
             : String(sanitized[key]);
 
@@ -531,6 +543,34 @@ export function recordToInternalSheetsDatabase(action: string, payload: any): vo
         }
       }
     });
+    saveGoogleSheetsDatabase(db);
+  } else if (action === 'update_packages' || action === 'sync_packages') {
+    const pkgList = Array.isArray(payload.packages) ? payload.packages : [];
+    const serialized = JSON.stringify(pkgList);
+    let found = false;
+    for (let i = 0; i < db.sheets.Pengaturan.length; i++) {
+      if (String(db.sheets.Pengaturan[i][0]) === 'packagesJson') {
+        db.sheets.Pengaturan[i][1] = serialized;
+        db.sheets.Pengaturan[i][2] = nowStr;
+        found = true;
+        break;
+      }
+    }
+    if (!found) db.sheets.Pengaturan.push(['packagesJson', serialized, nowStr]);
+    saveGoogleSheetsDatabase(db);
+  } else if (action === 'update_coverage' || action === 'sync_coverage') {
+    const covList = Array.isArray(payload.coverage) ? payload.coverage : [];
+    const serialized = JSON.stringify(covList);
+    let found = false;
+    for (let i = 0; i < db.sheets.Pengaturan.length; i++) {
+      if (String(db.sheets.Pengaturan[i][0]) === 'coverageJson') {
+        db.sheets.Pengaturan[i][1] = serialized;
+        db.sheets.Pengaturan[i][2] = nowStr;
+        found = true;
+        break;
+      }
+    }
+    if (!found) db.sheets.Pengaturan.push(['coverageJson', serialized, nowStr]);
     saveGoogleSheetsDatabase(db);
   } else if (action === 'sync_all') {
     if (Array.isArray(payload.customers)) {
@@ -613,6 +653,12 @@ export function mirrorExternalSheetsDataToServer(data: {
           : Array.isArray(diskSettings.promos)
           ? diskSettings.promos
           : [],
+      heroSlides:
+        Array.isArray(sanitized.heroSlides) && sanitized.heroSlides.length > 0
+          ? sanitized.heroSlides.map((s: string) => normalizeGoogleDriveImageUrl(s))
+          : Array.isArray(diskSettings.heroSlides)
+          ? diskSettings.heroSlides
+          : undefined,
     };
 
     if (JSON.stringify(diskSettings) !== JSON.stringify(nextSettings)) {
@@ -629,7 +675,7 @@ export function mirrorExternalSheetsDataToServer(data: {
       if (nextSettings[key] !== undefined && nextSettings[key] !== null) {
         if ((key === 'logoUrl' || key === 'qrisUrl') && String(nextSettings[key]).trim() === '') return;
         const valStr =
-          key === 'promos' && Array.isArray(nextSettings[key])
+          (key === 'promos' || key === 'heroSlides') && Array.isArray(nextSettings[key])
             ? JSON.stringify(nextSettings[key])
             : String(nextSettings[key]);
         let found = false;

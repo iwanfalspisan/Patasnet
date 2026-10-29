@@ -5,7 +5,6 @@ import Home from './components/Home';
 import SubscriptionForm from './components/SubscriptionForm';
 import CustomerDashboard from './components/CustomerDashboard';
 import AdminDashboard from './components/AdminDashboard';
-import DeveloperDashboard from './components/DeveloperDashboard';
 import Logo from './components/Logo';
 import { CustomerUser, SupportTicket, CompanySettings } from './types';
 import { ShieldAlert, User, CheckCircle, Wifi, AlertCircle, Eye, EyeOff, Mail, KeyRound, ArrowLeft, CheckCircle2, ShieldCheck, RefreshCw } from 'lucide-react';
@@ -15,6 +14,7 @@ import {
   getLocalTickets,
   saveLocalCustomers,
   saveLocalTickets,
+  updateLocalTicketStatus,
   updateLocalCustomerStatus,
   updateLocalPaymentStatus,
   addLocalCustomer,
@@ -27,8 +27,11 @@ import {
   DEFAULT_COMPANY_SETTINGS,
   requestPasswordResetLocally,
   resetCustomerPasswordLocally,
+  getLocalPackages,
 } from './lib/clientFallback';
 import { sanitizeSheetSettings, isAppsScriptWebAppUrl } from './lib/googleSheetsIntegration';
+import { generateNewCustomerWhatsAppUrl, getWhatsAppConfig } from './lib/whatsappApi';
+import { MessageSquare, ExternalLink } from 'lucide-react';
 
 function mergeIncomingSettings(prev: CompanySettings, incoming: Partial<CompanySettings>): CompanySettings {
   const sanitized = sanitizeSheetSettings({ ...incoming });
@@ -44,6 +47,12 @@ function mergeIncomingSettings(prev: CompanySettings, incoming: Partial<CompanyS
         : Array.isArray(prev.promos)
         ? prev.promos
         : [],
+    heroSlides:
+      Array.isArray(sanitized.heroSlides) && sanitized.heroSlides.length > 0
+        ? sanitized.heroSlides
+        : Array.isArray(prev.heroSlides) && prev.heroSlides.length > 0
+        ? prev.heroSlides
+        : DEFAULT_COMPANY_SETTINGS.heroSlides,
   };
 }
 
@@ -68,11 +77,15 @@ function haveSettingsChanged(a: CompanySettings, b: CompanySettings): boolean {
     'instagramUrl',
     'facebookUrl',
     'youtubeUrl',
+    'packagesJson',
+    'coverageJson',
+    'whatsappConfigJson',
   ];
   for (const k of keys) {
     if ((a[k] ?? '') !== (b[k] ?? '')) return true;
   }
   if (JSON.stringify(a.promos || []) !== JSON.stringify(b.promos || [])) return true;
+  if (JSON.stringify(a.heroSlides || []) !== JSON.stringify(b.heroSlides || [])) return true;
   return false;
 }
 
@@ -83,8 +96,40 @@ export default function App() {
   // Company Branding settings
   const [companySettings, setCompanySettings] = useState<CompanySettings>(DEFAULT_COMPANY_SETTINGS);
 
-  // Auth & Session
-  const [currentUser, setCurrentUser] = useState<CustomerUser | { isAdmin: boolean } | { isDeveloper: boolean } | null>(null);
+  // Dynamically sync browser favicon and document title with website logo & branding
+  useEffect(() => {
+    const activeLogoUrl =
+      companySettings.logoUrl && companySettings.logoUrl.trim() !== ''
+        ? companySettings.logoUrl
+        : DEFAULT_COMPANY_SETTINGS.logoUrl;
+
+    if (activeLogoUrl) {
+      let faviconEl = document.getElementById('dynamic-favicon') as HTMLLinkElement | null;
+      if (!faviconEl) {
+        faviconEl = document.createElement('link');
+        faviconEl.id = 'dynamic-favicon';
+        faviconEl.rel = 'icon';
+        document.head.appendChild(faviconEl);
+      }
+      faviconEl.href = activeLogoUrl;
+
+      let appleIconEl = document.getElementById('dynamic-apple-icon') as HTMLLinkElement | null;
+      if (!appleIconEl) {
+        appleIconEl = document.createElement('link');
+        appleIconEl.id = 'dynamic-apple-icon';
+        appleIconEl.rel = 'apple-touch-icon';
+        document.head.appendChild(appleIconEl);
+      }
+      appleIconEl.href = activeLogoUrl;
+    }
+
+    if (companySettings.name) {
+      document.title = `${companySettings.name} — ${companySettings.tagline || 'Layanan Internet Fiber Cepat'}`;
+    }
+  }, [companySettings.logoUrl, companySettings.name, companySettings.tagline]);
+
+  // Auth & Session (Admin & Pelanggan only)
+  const [currentUser, setCurrentUser] = useState<CustomerUser | { isAdmin: boolean } | null>(null);
 
   // Admin Data states
   const [adminCustomers, setAdminCustomers] = useState<CustomerUser[]>([]);
@@ -524,8 +569,6 @@ export default function App() {
     if (currentUser) {
       if ('isAdmin' in currentUser && (currentUser as any).isAdmin) {
         fetchAdminData();
-      } else if ('isDeveloper' in currentUser && (currentUser as any).isDeveloper) {
-        // Developer profile sync if needed
       } else {
         const customerUser = currentUser as CustomerUser;
         fetch(`/api/customers/${customerUser.id}`)
@@ -638,9 +681,7 @@ export default function App() {
         setLoginError('');
         setRegistrationSuccessUser(null);
 
-        if (loginData.user.isDeveloper) {
-          setCurrentPage('developer-dashboard');
-        } else if (loginData.user.isAdmin) {
+        if (loginData.user.isAdmin) {
           setCurrentPage('admin-dashboard');
         } else {
           setCurrentPage('customer-dashboard');
@@ -807,24 +848,51 @@ export default function App() {
     }
   };
 
+  const handleUpdateTicketStatus = async (ticketId: string, status: 'open' | 'resolved') => {
+    // 1. Update local storage & state immediately
+    const updatedTickets = updateLocalTicketStatus(ticketId, status);
+    setAdminSupportTickets(updatedTickets);
+    setAdminCustomers((prev) =>
+      prev.map((c) => {
+        if (!Array.isArray(c.tickets)) return c;
+        return {
+          ...c,
+          tickets: c.tickets.map((t) => (t.id === ticketId ? { ...t, status } : t)),
+        };
+      })
+    );
+    setCurrentUser((curr) => {
+      if (curr && 'id' in curr && Array.isArray((curr as CustomerUser).tickets)) {
+        return {
+          ...curr,
+          tickets: (curr as CustomerUser).tickets!.map((t) =>
+            t.id === ticketId ? { ...t, status } : t
+          ),
+        };
+      }
+      return curr;
+    });
+
+    // 2. Sync to server & Google Sheets
+    try {
+      await fetch('/api/tickets/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: ticketId, status }),
+      });
+      await fetchAdminData();
+    } catch (err) {
+      console.warn('Server ticket status update failed, updated locally:', err);
+    }
+  };
+
   const handleLogout = () => {
     setCurrentUser(null);
     setCurrentPage('home');
   };
 
-  if (currentPage === 'developer-dashboard') {
-    return (
-      <DeveloperDashboard
-        onLogout={handleLogout}
-        companyName={companySettings.name}
-        logoUrl={companySettings.logoUrl}
-        onUpdateCompanySettings={handleUpdateCompanySettings}
-      />
-    );
-  }
-
   return (
-    <div className="flex flex-col min-h-screen bg-slate-50 font-sans selection:bg-blue-500 selection:text-white">
+    <div className="flex flex-col min-h-screen bg-slate-50 font-sans selection:bg-blue-500 selection:text-white pb-20 md:pb-0">
       <Navbar
         currentUser={currentUser}
         onLogout={handleLogout}
@@ -866,11 +934,43 @@ export default function App() {
                   </p>
                 </div>
 
+                {/* WhatsApp API Notification Status */}
+                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-left space-y-2">
+                  <div className="flex items-center gap-2 text-emerald-800 font-extrabold text-[11px]">
+                    <MessageSquare className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>
+                      {(registrationSuccessUser as any)?._waNotification?.adminSent
+                        ? 'Notifikasi WhatsApp Otomatis Terkirim ke Admin!'
+                        : 'Terhubung ke Layanan WhatsApp Admin'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-emerald-700 leading-relaxed">
+                    Data pendaftaran & titik koordinat GPS pemasangan Anda telah siap diproses oleh tim teknisi kami. Klik tombol WhatsApp di bawah untuk konfirmasi instan ke Admin:
+                  </p>
+                  <a
+                    href={
+                      (registrationSuccessUser as any)?._waNotification?.waRedirectUrl ||
+                      generateNewCustomerWhatsAppUrl(
+                        registrationSuccessUser,
+                        getLocalPackages().find((p) => p.id === registrationSuccessUser.packageId),
+                        companySettings
+                      )
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold shadow-md shadow-emerald-600/20 transition flex items-center justify-center gap-2 text-xs"
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span>Kirim Konfirmasi ke WhatsApp Admin</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+
                 <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-left space-y-2 leading-relaxed">
                   <p className="font-semibold text-slate-800">Langkah Selanjutnya:</p>
                   <ol className="list-decimal list-inside text-slate-500 space-y-1 text-[11px]">
                     <li>Masuk ke Portal Pelanggan Anda.</li>
-                    <li>Selesaikan pembayaran pertama melalui pilihan transfer lokal.</li>
+                    <li>Selesaikan pembayaran pertama melalui QRIS atau transfer bank.</li>
                     <li>Teknisi kami akan segera menjadwalkan instalasi WiFi Anda.</li>
                   </ol>
                 </div>
@@ -884,7 +984,7 @@ export default function App() {
                   }}
                   className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold shadow-md shadow-blue-500/10 transition-all active:scale-95"
                 >
-                  Masuk Ke Portal Saya
+                  Masuk
                 </button>
               </div>
             ) : (
@@ -907,12 +1007,12 @@ export default function App() {
               <div className="flex justify-center mb-1">
                 <Logo companyName={companySettings.name} logoUrl={companySettings.logoUrl} tagline={companySettings.tagline} />
               </div>
-              <h2 className="text-lg font-extrabold text-slate-900 tracking-tight">
+              <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight">
                 {authViewMode === 'forgot-password'
                   ? 'Pemulihan Kata Sandi'
                   : authViewMode === 'reset-password'
                   ? 'Atur Ulang Kata Sandi'
-                  : `Masuk Portal ${(companySettings.name || 'PATAS NET').toUpperCase()}`}
+                  : 'Masuk'}
               </h2>
               <p className="text-slate-400">
                 {authViewMode === 'forgot-password'
@@ -1275,7 +1375,7 @@ export default function App() {
                     disabled={loginLoading}
                     className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-md transition-all active:scale-95 disabled:bg-slate-400"
                   >
-                    {loginLoading ? 'Menghubungkan...' : 'Masuk Portal'}
+                    {loginLoading ? 'Menghubungkan...' : 'Masuk'}
                   </button>
                 </form>
               </>
@@ -1291,13 +1391,13 @@ export default function App() {
               </button>
             </div>
 
-            {/* Quick Demo Credentials Autofill Widget */}
+            {/* Quick Demo Credentials Autofill Widget (Pelanggan & Admin Only) */}
             <div className="mt-6 p-4 rounded-2xl bg-gradient-to-br from-slate-50 to-blue-50/50 border border-slate-200/80 shadow-inner space-y-3">
               <div className="flex items-center gap-1.5 pb-1 border-b border-slate-100">
                 <span className="text-[10px] bg-blue-600 text-white font-extrabold px-1.5 py-0.5 rounded tracking-wide uppercase">DEMO</span>
                 <span className="font-bold text-slate-800 text-[11px]">Kredensial Akses Uji Coba:</span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 {/* Customer Demo Option */}
                 <button
                   type="button"
@@ -1331,23 +1431,6 @@ export default function App() {
                   <p className="text-[10px] text-slate-400 font-mono">Password: admin</p>
                   <span className="inline-block mt-1.5 text-[9px] text-indigo-500 font-bold group-hover:underline">Autofill &rarr;</span>
                 </button>
-
-                {/* Developer Demo Option */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setLoginEmail('ajayrostaman@gmail.com');
-                    setLoginPassword('pengelola123');
-                    setLoginIsAdmin(false);
-                    setLoginError('');
-                  }}
-                  className="p-2.5 bg-white hover:bg-amber-50/50 border border-slate-150 rounded-xl text-left transition-all active:scale-95 group shadow-sm"
-                >
-                  <p className="font-extrabold text-[10px] text-amber-600 group-hover:text-amber-700 uppercase tracking-wider mb-0.5">Developer</p>
-                  <p className="text-[11px] text-slate-700 font-medium truncate">ajayrostaman@...</p>
-                  <p className="text-[10px] text-slate-400 font-mono">pengelola123</p>
-                  <span className="inline-block mt-1.5 text-[9px] text-amber-600 font-bold group-hover:underline">Autofill &rarr;</span>
-                </button>
               </div>
             </div>
           </div>
@@ -1356,8 +1439,10 @@ export default function App() {
         {currentPage === 'customer-dashboard' && currentUser && !('isAdmin' in currentUser) && (
           <CustomerDashboard
             user={currentUser as CustomerUser}
+            supportTickets={adminSupportTickets}
             onRefreshUser={async () => {
               await fetchCustomerProfile((currentUser as CustomerUser).id);
+              await fetchAdminData();
             }}
             onLogout={handleLogout}
             companyName={companySettings.name}
@@ -1372,6 +1457,7 @@ export default function App() {
             supportTickets={adminSupportTickets}
             onRefreshData={fetchAdminData}
             onUpdateCustomerStatus={handleUpdateCustomerStatus}
+            onUpdateTicketStatus={handleUpdateTicketStatus}
             onVerifyPayment={handleVerifyPayment}
             onRejectPayment={handleRejectPayment}
             whatsappLogs={adminWhatsappLogs}

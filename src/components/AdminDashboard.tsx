@@ -32,9 +32,15 @@ import {
   Share2,
   Save,
   QrCode,
-  Zap
+  Zap,
+  MessageSquare,
+  Send,
+  Edit3,
+  RotateCcw,
+  Bell,
+  BookOpen
 } from 'lucide-react';
-import { CustomerUser, PaymentRecord, SupportTicket, WifiPackage, CompanySettings } from '../types';
+import { CustomerUser, PaymentRecord, SupportTicket, WifiPackage, CompanySettings, WhatsAppApiConfig } from '../types';
 import { generateCustomerPDFReport } from '../lib/pdfGenerator';
 import { PACKAGES } from './Home';
 import Logo from './Logo';
@@ -46,9 +52,42 @@ import {
   EMBEDDED_SPREADSHEET_URL,
   EMBEDDED_DRIVE_LOGO_URL,
   EMBEDDED_DRIVE_FOLDER_NAME,
+  DEFAULT_HERO_SLIDES,
   normalizeGoogleDriveImageUrl,
 } from '../lib/googleSheetsIntegration';
-import { getGoogleSheetsWebhookUrl, saveGoogleSheetsWebhookUrl, syncToGoogleSheets } from '../lib/clientFallback';
+import {
+  getGoogleSheetsWebhookUrl,
+  saveGoogleSheetsWebhookUrl,
+  syncToGoogleSheets,
+  getLocalPackages,
+  saveLocalPackages,
+  addOrUpdateLocalPackage,
+  deleteLocalPackage,
+  DEFAULT_PACKAGES,
+  getLocalCoverage,
+  saveLocalCoverage,
+  computeCoverageSummaryText,
+  addLocalCoverageCity,
+  updateLocalCoverageCity,
+  deleteLocalCoverageCity,
+  addLocalKecamatan,
+  updateLocalKecamatan,
+  deleteLocalKecamatan,
+  addLocalKelurahan,
+  updateLocalKelurahan,
+  deleteLocalKelurahan,
+  DEFAULT_COVERAGE_AREAS,
+  deleteLocalCustomer,
+  updateLocalTicketStatus,
+} from '../lib/clientFallback';
+import {
+  getWhatsAppConfig,
+  saveWhatsAppConfig,
+  sendWhatsAppMessageViaApi,
+  getLocalWhatsAppLogs,
+  DEFAULT_WHATSAPP_CONFIG,
+  formatWhatsAppNumber,
+} from '../lib/whatsappApi';
 import { generateDefaultQrisSvg } from '../lib/qrisUtils';
 import {
   AreaChart,
@@ -66,13 +105,14 @@ import {
 import * as XLSX from 'xlsx';
 
 // Leaflet import for admin map visualization
-import L from '../lib/leafletSafe';
+import L, { createCustomPinIcon, addResilientTileLayer } from '../lib/leafletSafe';
 
 interface AdminDashboardProps {
   customers: CustomerUser[];
   supportTickets: SupportTicket[];
   onRefreshData: () => void;
   onUpdateCustomerStatus: (id: string, status: 'pending' | 'active' | 'suspended') => Promise<void>;
+  onUpdateTicketStatus?: (id: string, status: 'open' | 'resolved') => Promise<void>;
   onVerifyPayment: (userId: string, paymentId: string) => Promise<void>;
   onRejectPayment?: (userId: string, paymentId: string) => Promise<void>;
   whatsappLogs?: any[];
@@ -85,13 +125,14 @@ export default function AdminDashboard({
   supportTickets = [],
   onRefreshData,
   onUpdateCustomerStatus,
+  onUpdateTicketStatus,
   onVerifyPayment,
   onRejectPayment,
   whatsappLogs = [],
   companySettings,
   onUpdateCompanySettings
 }: AdminDashboardProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'customers' | 'payments' | 'tickets' | 'packages' | 'company_settings' | 'qris' | 'coverage' | 'sheets'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'customers' | 'payments' | 'tickets' | 'packages' | 'company_settings' | 'qris' | 'coverage' | 'whatsapp_api' | 'sheets'>('overview');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedUserForMap, setSelectedUserForMap] = useState<CustomerUser | null>(null);
 
@@ -144,6 +185,14 @@ export default function AdminDashboard({
   const [newPromoImage, setNewPromoImage] = useState<string>('');
   const [uploadingPromo, setUploadingPromo] = useState(false);
 
+  // Hero Background Slideshow states
+  const [heroSlidesList, setHeroSlidesList] = useState<string[]>(
+    companySettings?.heroSlides && companySettings.heroSlides.length > 0
+      ? companySettings.heroSlides
+      : DEFAULT_HERO_SLIDES
+  );
+  const [newHeroSlideUrl, setNewHeroSlideUrl] = useState('');
+
   // Sync inputs with props if they load later
   useEffect(() => {
     if (companySettings) {
@@ -161,6 +210,9 @@ export default function AdminDashboard({
       setCompanyLogoTextInput(companySettings.logoText || 'PATAS NET');
       if (companySettings.logoUrl) setCompanyLogoUrlInput(companySettings.logoUrl);
       if (companySettings.promos) setPromosList(companySettings.promos);
+      if (companySettings.heroSlides && companySettings.heroSlides.length > 0) {
+        setHeroSlidesList(companySettings.heroSlides);
+      }
       if (companySettings.qrisUrl !== undefined) setQrisUrlInput(companySettings.qrisUrl);
       if (companySettings.qrisMerchantName) setQrisMerchantNameInput(companySettings.qrisMerchantName);
       if (companySettings.qrisNmid) setQrisNmidInput(companySettings.qrisNmid);
@@ -196,8 +248,9 @@ export default function AdminDashboard({
   });
 
   // Packages management states
-  const [packagesList, setPackagesList] = useState<WifiPackage[]>([]);
+  const [packagesList, setPackagesList] = useState<WifiPackage[]>(() => getLocalPackages());
   const [loadingPackages, setLoadingPackages] = useState(false);
+  const [editingPkgId, setEditingPkgId] = useState<string | null>(null);
   const [newPkgName, setNewPkgName] = useState('');
   const [newPkgSpeed, setNewPkgSpeed] = useState('');
   const [newPkgPrice, setNewPkgPrice] = useState('');
@@ -210,35 +263,118 @@ export default function AdminDashboard({
   const [customerToDelete, setCustomerToDelete] = useState<CustomerUser | null>(null);
 
   // Coverage states
-  const [coverageList, setCoverageList] = useState<any[]>([]);
+  const [coverageList, setCoverageList] = useState<any[]>(() => getLocalCoverage());
   const [loadingCoverage, setLoadingCoverage] = useState(false);
   const [newCityName, setNewCityName] = useState('');
   const [newCityType, setNewCityType] = useState('Kota');
+  const [editingCity, setEditingCity] = useState<{ oldName: string; newName: string; regionType: string } | null>(null);
   const [newKecName, setNewKecName] = useState<{ [city: string]: string }>({});
+  const [editingKec, setEditingKec] = useState<{ cityName: string; oldName: string; newName: string } | null>(null);
   const [newKelName, setNewKelName] = useState<{ [kecKey: string]: string }>({});
+  const [newKelNodes, setNewKelNodes] = useState<{ [kecKey: string]: string }>({});
+  const [editingKel, setEditingKel] = useState<{ cityName: string; kecamatanName: string; oldName: string; newName: string; nodesCount: string | number } | null>(null);
 
   // Inline delete confirmations for coverage
   const [cityToDelete, setCityToDelete] = useState<string | null>(null);
   const [kecToDelete, setKecToDelete] = useState<{ cityName: string; name: string } | null>(null);
   const [kelToDelete, setKelToDelete] = useState<{ cityName: string; kecamatanName: string; name: string } | null>(null);
 
+  // WhatsApp API Gateway states
+  const [waConfig, setWaConfig] = useState<WhatsAppApiConfig>(() => getWhatsAppConfig(companySettings));
+  const [waTestPhone, setWaTestPhone] = useState(companySettings?.whatsappNumber || '081234567890');
+  const [waTesting, setWaTesting] = useState(false);
+  const [waSaving, setWaSaving] = useState(false);
+  const [waTestResult, setWaTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  useEffect(() => {
+    setWaConfig(getWhatsAppConfig(companySettings));
+  }, [companySettings?.whatsappConfigJson]);
+
+  const handleSaveWhatsAppConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setWaSaving(true);
+    try {
+      const saved = saveWhatsAppConfig(waConfig);
+      setWaConfig(saved);
+      if (onUpdateCompanySettings) {
+        await onUpdateCompanySettings({
+          name: companyNameInput || companySettings?.name || 'Patas.Net',
+          whatsappNumber: saved.adminPhone || companyWhatsappNumberInput,
+          whatsappConfigJson: JSON.stringify(saved),
+        });
+      }
+      showToast('Pengaturan API WhatsApp berhasil disimpan & aktif di seluruh perangkat!');
+    } catch (err) {
+      console.error(err);
+      showToast('Gagal menyimpan pengaturan API WhatsApp.', 'error');
+    } finally {
+      setWaSaving(false);
+    }
+  };
+
+  const handleTestSendWhatsApp = async () => {
+    const target = (waTestPhone || waConfig.adminPhone || companyWhatsappNumberInput || '').trim();
+    if (!target) {
+      showToast('Masukkan nomor WhatsApp tujuan tes terlebih dahulu.', 'error');
+      return;
+    }
+    setWaTesting(true);
+    setWaTestResult(null);
+    try {
+      const testMsg =
+        `✅ *TES KONEKSI API WHATSAPP - ${companyNameInput || 'PATAS NET'}*\n\n` +
+        `Selamat! Integrasi WhatsApp Gateway (${waConfig.provider.toUpperCase()}) Anda telah terhubung.\n` +
+        `Setiap ada pelanggan baru mendaftar di website, sistem akan otomatis mengirimkan detail pelanggan & link titik koordinat Google Maps ke nomor ini.`;
+      const res = await sendWhatsAppMessageViaApi(target, testMsg, waConfig);
+      setWaTestResult({ success: res.success, message: res.message });
+      setWaLogs(getLocalWhatsAppLogs());
+      if (res.success) {
+        showToast(res.message, 'success');
+      } else {
+        showToast(res.message, 'error');
+      }
+    } catch (err: any) {
+      setWaTestResult({
+        success: false,
+        message: err?.message || 'Gagal mengirim pesan uji coba WhatsApp.',
+      });
+    } finally {
+      setWaTesting(false);
+    }
+  };
+
+  const syncCoverageSummaryWithCompany = (updatedCov: any[]) => {
+    setCoverageList(updatedCov);
+    const summaryText = computeCoverageSummaryText(updatedCov);
+    setCompanyCoverageTextInput(summaryText);
+    if (onUpdateCompanySettings) {
+      onUpdateCompanySettings({
+        name: companyNameInput || companySettings?.name || 'Patas.Net',
+        coverageText: summaryText,
+        coverageJson: JSON.stringify(updatedCov),
+      }).catch(() => {});
+    }
+  };
+
   const fetchCoverageList = async () => {
     setLoadingCoverage(true);
     try {
+      const localCov = getLocalCoverage();
+      setCoverageList(localCov);
+      setCompanyCoverageTextInput(computeCoverageSummaryText(localCov));
+
       const response = await fetch('/api/coverage');
       if (response.ok) {
         const data = await response.json();
-        setCoverageList(data || []);
-        if (Array.isArray(data) && data.length > 0) {
-          const totalCities = data.length;
-          const totalKec = data.reduce((acc: number, c: any) => acc + (c.kecamatans?.length || 0), 0);
-          const totalKel = data.reduce((acc: number, c: any) => acc + (c.kecamatans?.reduce((kAcc: number, k: any) => kAcc + (k.kelurahans?.length || 0), 0) || 0), 0);
-          const calculatedText = `${totalCities} Kota/Kabupaten, ${totalKec} Kecamatan, ${totalKel} Kelurahan`;
-          setCompanyCoverageTextInput(calculatedText);
+        if (Array.isArray(data) && data.length > 0 && localCov.length === 0) {
+          const saved = saveLocalCoverage(data, false);
+          setCoverageList(saved);
+          setCompanyCoverageTextInput(computeCoverageSummaryText(saved));
         }
       }
-    } catch (err) {
-      console.error('Failed to fetch coverage:', err);
+    } catch {
+      const localCov = getLocalCoverage();
+      setCoverageList(localCov);
     } finally {
       setLoadingCoverage(false);
     }
@@ -247,13 +383,19 @@ export default function AdminDashboard({
   const fetchPackagesList = async () => {
     setLoadingPackages(true);
     try {
+      const localPkgs = getLocalPackages();
+      setPackagesList(localPkgs);
+
       const res = await fetch('/api/packages');
       if (res.ok) {
         const data = await res.json();
-        setPackagesList(data.packages || []);
+        if (Array.isArray(data.packages) && data.packages.length > 0 && localPkgs.length === 0) {
+          const saved = saveLocalPackages(data.packages, false);
+          setPackagesList(saved);
+        }
       }
-    } catch (err) {
-      console.error('Failed to fetch packages:', err);
+    } catch {
+      setPackagesList(getLocalPackages());
     } finally {
       setLoadingPackages(false);
     }
@@ -267,146 +409,165 @@ export default function AdminDashboard({
     }
   }, [activeTab]);
 
-  // Initial packages fetch for overview analytics
   useEffect(() => {
     fetchPackagesList();
+    fetchCoverageList();
   }, []);
 
-  // ---------------- Coverage Handlers ----------------
+  // ---------------- Coverage Handlers (Local + Server + Google Sheets Sync) ----------------
   const handleAddCity = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newCityName.trim()) return;
+    const trimmed = newCityName.trim();
+    if (!trimmed) return;
 
-    try {
-      const response = await fetch('/api/coverage/city', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cityName: newCityName.trim(), regionType: newCityType })
-      });
-      if (response.ok) {
-        setNewCityName('');
-        await fetchCoverageList();
-        showToast('Kota/Kabupaten berhasil ditambahkan!');
-      } else {
-        const data = await response.json();
-        showToast(data.message || 'Gagal menambahkan kota.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan saat menambah kota.', 'error');
-    }
+    const updated = addLocalCoverageCity(trimmed, newCityType);
+    syncCoverageSummaryWithCompany(updated);
+    setNewCityName('');
+
+    fetch('/api/coverage/city', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cityName: trimmed, regionType: newCityType }),
+    }).catch(() => {});
+
+    showToast(`Wilayah ${newCityType} ${trimmed} berhasil ditambahkan & disinkronkan!`);
+  };
+
+  const handleSaveEditCity = async () => {
+    if (!editingCity || !editingCity.newName.trim()) return;
+    const updated = updateLocalCoverageCity(
+      editingCity.oldName,
+      editingCity.newName.trim(),
+      editingCity.regionType
+    );
+    syncCoverageSummaryWithCompany(updated);
+    fetch('/api/coverage/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coverage: updated }),
+    }).catch(() => {});
+    setEditingCity(null);
+    showToast(`Wilayah berhasil diperbarui menjadi ${editingCity.regionType} ${editingCity.newName.trim()}!`);
   };
 
   const handleDeleteCity = async (cityName: string) => {
-    try {
-      const response = await fetch('/api/coverage/city/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cityName })
-      });
-      if (response.ok) {
-        setCityToDelete(null);
-        await fetchCoverageList();
-        showToast(`Wilayah ${cityName} berhasil dihapus.`);
-      } else {
-        showToast('Gagal menghapus kota.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
-    }
+    const updated = deleteLocalCoverageCity(cityName);
+    syncCoverageSummaryWithCompany(updated);
+    setCityToDelete(null);
+
+    fetch('/api/coverage/city/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cityName }),
+    }).catch(() => {});
+
+    showToast(`Wilayah ${cityName} berhasil dihapus.`);
   };
 
   const handleAddKecamatan = async (cityName: string) => {
     const name = newKecName[cityName];
     if (!name || !name.trim()) return;
+    const trimmed = name.trim();
 
-    try {
-      const response = await fetch('/api/coverage/kecamatan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cityName, name: name.trim() })
-      });
-      if (response.ok) {
-        setNewKecName(prev => ({ ...prev, [cityName]: '' }));
-        await fetchCoverageList();
-        showToast(`Kecamatan ${name} berhasil ditambahkan!`);
-      } else {
-        const data = await response.json();
-        showToast(data.message || 'Gagal menambahkan kecamatan.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
-    }
+    const updated = addLocalKecamatan(cityName, trimmed);
+    syncCoverageSummaryWithCompany(updated);
+    setNewKecName((prev) => ({ ...prev, [cityName]: '' }));
+
+    fetch('/api/coverage/kecamatan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cityName, name: trimmed }),
+    }).catch(() => {});
+
+    showToast(`Kecamatan ${trimmed} berhasil ditambahkan ke ${cityName}!`);
+  };
+
+  const handleSaveEditKecamatan = async () => {
+    if (!editingKec || !editingKec.newName.trim()) return;
+    const updated = updateLocalKecamatan(
+      editingKec.cityName,
+      editingKec.oldName,
+      editingKec.newName.trim()
+    );
+    syncCoverageSummaryWithCompany(updated);
+    fetch('/api/coverage/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coverage: updated }),
+    }).catch(() => {});
+    setEditingKec(null);
+    showToast(`Nama kecamatan berhasil diubah menjadi ${editingKec.newName.trim()}!`);
   };
 
   const handleDeleteKecamatan = async (cityName: string, name: string) => {
-    try {
-      const response = await fetch('/api/coverage/kecamatan/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cityName, name })
-      });
-      if (response.ok) {
-        setKecToDelete(null);
-        await fetchCoverageList();
-        showToast(`Kecamatan ${name} berhasil dihapus.`);
-      } else {
-        showToast('Gagal menghapus kecamatan.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
-    }
+    const updated = deleteLocalKecamatan(cityName, name);
+    syncCoverageSummaryWithCompany(updated);
+    setKecToDelete(null);
+
+    fetch('/api/coverage/kecamatan/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cityName, name }),
+    }).catch(() => {});
+
+    showToast(`Kecamatan ${name} berhasil dihapus.`);
   };
 
   const handleAddKelurahan = async (cityName: string, kecamatanName: string) => {
     const key = `${cityName}-${kecamatanName}`;
     const name = newKelName[key];
     if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    const nodesCount = Number(newKelNodes[key]) || 15;
 
-    try {
-      const response = await fetch('/api/coverage/kelurahan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cityName, kecamatanName, name: name.trim() })
-      });
-      if (response.ok) {
-        setNewKelName(prev => ({ ...prev, [key]: '' }));
-        await fetchCoverageList();
-        showToast(`Kelurahan ${name} berhasil ditambahkan!`);
-      } else {
-        const data = await response.json();
-        showToast(data.message || 'Gagal menambahkan kelurahan.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
-    }
+    const updated = addLocalKelurahan(cityName, kecamatanName, trimmed, nodesCount);
+    syncCoverageSummaryWithCompany(updated);
+    setNewKelName((prev) => ({ ...prev, [key]: '' }));
+    setNewKelNodes((prev) => ({ ...prev, [key]: '' }));
+
+    fetch('/api/coverage/kelurahan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cityName, kecamatanName, name: trimmed, nodesCount }),
+    }).catch(() => {});
+
+    showToast(`Kelurahan ${trimmed} (${nodesCount} Node ODP) berhasil ditambahkan!`);
+  };
+
+  const handleSaveEditKelurahan = async () => {
+    if (!editingKel || !editingKel.newName.trim()) return;
+    const updated = updateLocalKelurahan(
+      editingKel.cityName,
+      editingKel.kecamatanName,
+      editingKel.oldName,
+      editingKel.newName.trim(),
+      Number(editingKel.nodesCount) || 15
+    );
+    syncCoverageSummaryWithCompany(updated);
+    fetch('/api/coverage/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coverage: updated }),
+    }).catch(() => {});
+    setEditingKel(null);
+    showToast(`Kelurahan ${editingKel.newName.trim()} berhasil diperbarui!`);
   };
 
   const handleDeleteKelurahan = async (cityName: string, kecamatanName: string, name: string) => {
-    try {
-      const response = await fetch('/api/coverage/kelurahan/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cityName, kecamatanName, name })
-      });
-      if (response.ok) {
-        setKelToDelete(null);
-        await fetchCoverageList();
-        showToast(`Kelurahan ${name} berhasil dihapus.`);
-      } else {
-        showToast('Gagal menghapus kelurahan.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
-    }
+    const updated = deleteLocalKelurahan(cityName, kecamatanName, name);
+    syncCoverageSummaryWithCompany(updated);
+    setKelToDelete(null);
+
+    fetch('/api/coverage/kelurahan/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cityName, kecamatanName, name }),
+    }).catch(() => {});
+
+    showToast(`Kelurahan ${name} berhasil dihapus.`);
   };
 
-  // ---------------- Packages Handlers ----------------
+  // ---------------- Packages Handlers (Local + Server + Google Sheets Sync) ----------------
   const handleAddPackage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPkgName.trim() || !newPkgSpeed.trim() || !newPkgPrice) {
@@ -414,82 +575,119 @@ export default function AdminDashboard({
       return;
     }
 
-    try {
-      const featuresArr = newPkgFeatures
-        .split('\n')
-        .map(f => f.trim())
-        .filter(Boolean);
+    const featuresArr = newPkgFeatures
+      .split('\n')
+      .map((f) => f.trim())
+      .filter(Boolean);
 
-      const res = await fetch('/api/packages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newPkgName.trim(),
-          speed: newPkgSpeed.trim(),
-          price: Number(newPkgPrice),
-          type: newPkgType,
-          features: featuresArr,
-          popular: newPkgPopular
-        })
-      });
+    const finalFeatures =
+      featuresArr.length > 0
+        ? featuresArr
+        : ['100% Fiber Optik Unlimited', 'Upload & Download Simetris 1:1', 'GRATIS Biaya Pasang'];
 
-      if (res.ok) {
-        setNewPkgName('');
-        setNewPkgSpeed('');
-        setNewPkgPrice('');
-        setNewPkgFeatures('');
-        setNewPkgPopular(false);
-        await fetchPackagesList();
-        showToast('Paket WiFi baru berhasil ditambahkan!');
-      } else {
-        const data = await res.json();
-        showToast(data.message || 'Gagal menambahkan paket.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
+    const pkgId =
+      editingPkgId ||
+      `${newPkgType}-${newPkgName
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')}-${Date.now().toString().slice(-3)}`;
+
+    const pkgObj: WifiPackage = {
+      id: pkgId,
+      name: newPkgName.trim(),
+      speed: newPkgSpeed.trim(),
+      price: Number(newPkgPrice),
+      type: newPkgType,
+      features: finalFeatures,
+      popular: newPkgPopular,
+    };
+
+    const updatedList = addOrUpdateLocalPackage(pkgObj);
+    setPackagesList(updatedList);
+
+    if (onUpdateCompanySettings) {
+      onUpdateCompanySettings({
+        name: companyNameInput || companySettings?.name || 'Patas.Net',
+        packagesJson: JSON.stringify(updatedList),
+      }).catch(() => {});
     }
+
+    fetch('/api/packages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pkgObj),
+    }).catch(() => {});
+
+    const wasEditing = Boolean(editingPkgId);
+    setEditingPkgId(null);
+    setNewPkgName('');
+    setNewPkgSpeed('');
+    setNewPkgPrice('');
+    setNewPkgFeatures('');
+    setNewPkgPopular(false);
+
+    showToast(
+      wasEditing
+        ? `Paket "${pkgObj.name}" berhasil diperbarui & disinkronkan!`
+        : `Paket WiFi baru "${pkgObj.name}" berhasil ditambahkan & aktif di website!`
+    );
+  };
+
+  const handleStartEditPackage = (pkg: WifiPackage) => {
+    setEditingPkgId(pkg.id);
+    setNewPkgName(pkg.name);
+    setNewPkgSpeed(pkg.speed);
+    setNewPkgPrice(String(pkg.price));
+    setNewPkgType(pkg.type);
+    setNewPkgFeatures((pkg.features || []).join('\n'));
+    setNewPkgPopular(Boolean(pkg.popular));
+    window.scrollTo({ top: 180, behavior: 'smooth' });
+  };
+
+  const handleCancelEditPackage = () => {
+    setEditingPkgId(null);
+    setNewPkgName('');
+    setNewPkgSpeed('');
+    setNewPkgPrice('');
+    setNewPkgType('home');
+    setNewPkgFeatures('');
+    setNewPkgPopular(false);
   };
 
   const handleDeletePackage = async (id: string) => {
-    try {
-      const res = await fetch('/api/packages/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id })
-      });
-      if (res.ok) {
-        setPackageToDelete(null);
-        await fetchPackagesList();
-        showToast('Paket WiFi berhasil dihapus.');
-      } else {
-        showToast('Gagal menghapus paket.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
+    const updatedList = deleteLocalPackage(id);
+    setPackagesList(updatedList);
+    setPackageToDelete(null);
+
+    if (onUpdateCompanySettings) {
+      onUpdateCompanySettings({
+        name: companyNameInput || companySettings?.name || 'Patas.Net',
+        packagesJson: JSON.stringify(updatedList),
+      }).catch(() => {});
     }
+
+    fetch('/api/packages/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
+
+    showToast('Paket WiFi berhasil dihapus dari daftar layanan.');
   };
 
   // ---------------- Customer Deletion Handler ----------------
   const handleDeleteCustomer = async (id: string) => {
-    try {
-      const res = await fetch('/api/customers/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id })
-      });
-      if (res.ok) {
-        setCustomerToDelete(null);
-        onRefreshData();
-        showToast('Pelanggan berhasil dihapus dari sistem.');
-      } else {
-        showToast('Gagal menghapus pelanggan.', 'error');
-      }
-    } catch (err) {
-      console.error(err);
-      showToast('Kesalahan jaringan.', 'error');
-    }
+    deleteLocalCustomer(id);
+    setCustomerToDelete(null);
+    onRefreshData();
+
+    fetch('/api/customers/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
+
+    showToast('Pelanggan berhasil dihapus dari sistem.');
   };
 
   // ---------------- Promo Images Handlers ----------------
@@ -586,10 +784,11 @@ export default function AdminDashboard({
       qrisNmid: qrisNmidInput,
       qrisAutoVerify: qrisAutoVerifyInput,
       qrisInstructions: qrisInstructionsInput,
+      heroSlides: heroSlidesList,
     });
     setSavingSettings(false);
     if (success) {
-      showToast('Pengaturan seluruh informasi website berhasil disimpan & disinkronkan!');
+      showToast('Perubahan berhasil disimpan! Seluruh informasi website & Google Sheets telah diperbarui.');
     } else {
       showToast('Gagal memperbarui pengaturan.', 'error');
     }
@@ -693,10 +892,10 @@ export default function AdminDashboard({
         body: JSON.stringify({ userId, paymentId, type })
       });
       if (response.ok) {
-        alert('Notifikasi Pengingat WhatsApp berhasil dikirim ke pelanggan!');
+        showToast('Notifikasi Pengingat WhatsApp berhasil dikirim ke pelanggan!');
         onRefreshData(); // refresh logs
       } else {
-        alert('Gagal mengirim pengingat WhatsApp.');
+        showToast('Gagal mengirim pengingat WhatsApp.', 'error');
       }
     } catch (err) {
       console.error(err);
@@ -887,9 +1086,9 @@ function doPost(e) {
     showToast('Kode Google Apps Script disalin ke clipboard!', 'success');
   };
 
-  // Interactive leafet map display for customer pins
+  // Interactive leaflet map display for customer pins
   useEffect(() => {
-    if (activeTab !== 'customers' || !customers || customers.length === 0) return;
+    if (activeTab !== 'customers' || !safeCustomers || safeCustomers.length === 0) return;
 
     const mapElement = document.getElementById('admin-customers-map');
     if (!mapElement) return;
@@ -901,13 +1100,13 @@ function doPost(e) {
       if (!map) {
         const defaultCenter: [number, number] = [-6.2088, 106.8456];
         map = L.map(mapElement, {
-          zoomAnimation: false, // Prevents transition crash
+          zoomAnimation: false,
+          fadeAnimation: false,
+          markerZoomAnimation: false,
         }).setView(defaultCenter, 11);
         (mapElement as any)._leaflet_map = map;
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenStreetMap contributors'
-        }).addTo(map);
+        addResilientTileLayer(map, 'street');
 
         markersLayer = L.layerGroup().addTo(map);
         (mapElement as any)._markers_layer = markersLayer;
@@ -917,27 +1116,26 @@ function doPost(e) {
         markersLayer.clearLayers();
       }
 
-      // Override marker icons safely
-      const DefaultIcon = L.icon({
-        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-        iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-        popupAnchor: [1, -34],
-        shadowSize: [41, 41]
-      });
+      const activePinIcon = createCustomPinIcon('#10b981');
+      const pendingPinIcon = createCustomPinIcon('#f59e0b');
+      const suspendedPinIcon = createCustomPinIcon('#ef4444');
 
       // Plot each customer's coordinates to the layer
       safeCustomers.forEach((c) => {
         if (c.coordinates && c.coordinates.length === 2 && markersLayer) {
-          const marker = L.marker(c.coordinates, { icon: DefaultIcon }).addTo(markersLayer);
-          const pkg = PACKAGES.find((p) => p.id === c.packageId);
+          const pinIcon =
+            c.status === 'active'
+              ? activePinIcon
+              : c.status === 'suspended'
+              ? suspendedPinIcon
+              : pendingPinIcon;
+          const marker = L.marker(c.coordinates, { icon: pinIcon }).addTo(markersLayer);
+          const pkg = packagesList.find((p) => p.id === c.packageId) || PACKAGES.find((p) => p.id === c.packageId);
           marker.bindPopup(`
             <div style="font-family: sans-serif; font-size: 11px; line-height: 1.4;">
               <strong style="font-size: 13px; color: #1e3a8a;">${c.name}</strong><br/>
               <strong>No HP:</strong> ${c.phone}<br/>
-              <strong>Paket:</strong> ${pkg?.name || 'N/A'}<br/>
+              <strong>Paket:</strong> ${pkg?.name || c.packageId || 'N/A'}<br/>
               <strong>Status:</strong> <span style="font-weight:bold; color: ${c.status === 'active' ? '#10b981' : '#f59e0b'}">${c.status.toUpperCase()}</span><br/>
               <strong>Alamat:</strong> ${c.address}
             </div>
@@ -945,20 +1143,21 @@ function doPost(e) {
         }
       });
 
-      // Re-invalidate size safely
-      setTimeout(() => {
-        if (map && (mapElement as any)._leaflet_map) {
-          try {
-            map.invalidateSize();
-          } catch {}
-        }
-      }, 100);
+      // Re-invalidate size safely across layout paints
+      [50, 200, 500].forEach((ms) => {
+        setTimeout(() => {
+          if (map && (mapElement as any)._leaflet_map) {
+            try {
+              map.invalidateSize();
+            } catch {}
+          }
+        }, ms);
+      });
     } catch (err) {
       console.warn('Admin map init error:', err);
     }
 
     return () => {
-      // Clean up only when switching away from customers tab or unmounting
       if (activeTab !== 'customers') {
         const currentMap = (mapElement as any)._leaflet_map;
         if (currentMap) {
@@ -971,7 +1170,7 @@ function doPost(e) {
         }
       }
     };
-  }, [activeTab, safeCustomers]);
+  }, [activeTab, safeCustomers, packagesList]);
 
   // Handle focus on map coordinate
   const handleFocusOnMap = (customer: CustomerUser) => {
@@ -995,10 +1194,12 @@ function doPost(e) {
       )
   );
 
+  const [mobileAdminDrawerOpen, setMobileAdminDrawerOpen] = useState(false);
+
   return (
-    <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 flex flex-col lg:flex-row gap-8 text-xs relative">
-      {/* LEFT SIDEBAR NAVIGATION PANEL (Collapses to icon-only rail when hidden) */}
-      <aside className={`shrink-0 transition-all duration-300 lg:sticky lg:top-24 h-fit ${isSidebarOpen ? 'w-full lg:w-72' : 'w-full lg:w-20'}`}>
+    <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 flex flex-col lg:flex-row gap-8 text-xs relative pb-24 lg:pb-8">
+      {/* LEFT SIDEBAR NAVIGATION PANEL (Desktop Only - Mobile uses Fixed Bottom App Bar) */}
+      <aside className={`hidden lg:block shrink-0 transition-all duration-300 lg:sticky lg:top-24 h-fit ${isSidebarOpen ? 'w-full lg:w-72' : 'w-full lg:w-20'}`}>
         <div className={`bg-white rounded-3xl border border-slate-200/80 shadow-md flex flex-col transition-all duration-300 ${isSidebarOpen ? 'p-5 gap-5' : 'p-3 gap-3 items-center'}`}>
           <div className={`border-b border-slate-100 flex items-center ${isSidebarOpen ? 'pb-3.5 justify-between w-full gap-2' : 'pb-2.5 justify-center w-full'}`}>
             {isSidebarOpen ? (
@@ -1212,6 +1413,31 @@ function doPost(e) {
 
               <button
                 type="button"
+                onClick={() => setActiveTab('whatsapp_api')}
+                title="API WhatsApp & Notifikasi"
+                className={`rounded-xl font-bold transition-all ${
+                  isSidebarOpen
+                    ? 'flex items-center gap-3 px-3 py-2.5 text-left w-full'
+                    : 'flex items-center justify-center p-3 text-center'
+                } ${
+                  activeTab === 'whatsapp_api'
+                    ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/15'
+                    : 'text-slate-600 hover:text-emerald-600 hover:bg-emerald-50/50'
+                }`}
+              >
+                <MessageSquare className="w-4 h-4 text-emerald-500 shrink-0" />
+                {isSidebarOpen && (
+                  <div className="flex items-center justify-between w-full">
+                    <span>API WhatsApp & Notif</span>
+                    <span className="text-[8px] bg-emerald-100 text-emerald-800 font-extrabold px-1.5 py-0.5 rounded">
+                      Auto WA
+                    </span>
+                  </div>
+                )}
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setActiveTab('sheets')}
                 title="Google Sheets & Drive Database"
                 className={`rounded-xl font-bold transition-all ${
@@ -1241,22 +1467,36 @@ function doPost(e) {
 
       {/* RIGHT MAIN PANEL */}
       <div className="flex-1 space-y-6 min-w-0">
-        {/* Toast Notification Banner */}
+        {/* Fixed High-Visibility Floating Toast Notification */}
         {toast && (
-          <div
-            className={`p-4 rounded-2xl flex items-center justify-between text-xs font-bold shadow-lg animate-in slide-in-from-top-2 ${
-              toast.type === 'success'
-                ? 'bg-emerald-600 text-white shadow-emerald-600/20'
-                : 'bg-red-600 text-white shadow-red-600/20'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              {toast.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
-              <span>{toast.message}</span>
+          <div className="fixed top-20 right-4 sm:right-6 z-[100] max-w-md w-[calc(100%-2rem)] toast-animate">
+            <div
+              className={`relative overflow-hidden p-4 rounded-2xl flex items-start justify-between gap-3 text-xs font-bold shadow-2xl border ${
+                toast.type === 'success'
+                  ? 'bg-emerald-600 text-white border-emerald-400/40 shadow-emerald-900/30'
+                  : 'bg-red-600 text-white border-red-400/40 shadow-red-900/30'
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <div className="p-1.5 bg-white/20 rounded-xl shrink-0 mt-0.5">
+                  {toast.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
+                </div>
+                <div className="space-y-0.5">
+                  <p className="text-[10px] uppercase tracking-wider text-white/80 font-extrabold">
+                    {toast.type === 'success' ? 'Notifikasi Sistem — Berhasil Disimpan' : 'Notifikasi Sistem — Peringatan'}
+                  </p>
+                  <p className="text-xs leading-relaxed font-bold">{toast.message}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setToast(null)}
+                className="p-1.5 hover:bg-white/20 rounded-xl transition shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <div className="absolute bottom-0 left-0 h-1 bg-white/50 toast-progress-bar" />
             </div>
-            <button onClick={() => setToast(null)} className="p-1 hover:bg-white/20 rounded-lg">
-              <X className="w-3.5 h-3.5" />
-            </button>
           </div>
         )}
 
@@ -1460,6 +1700,9 @@ function doPost(e) {
             </button>
           </div>
         </div>
+
+        {/* Animated Tab Content Container */}
+        <div key={activeTab} className="tab-transition space-y-6">
 
         {/* Tabs Content Wrapper */}
         <div className="space-y-8">
@@ -2031,43 +2274,182 @@ function doPost(e) {
 
         {/* TAB 4: COMPLAINTS / GANGGUAN SUPPORT TICKETS */}
         {activeTab === 'tickets' && (
-          <div className="space-y-8 animate-in fade-in duration-300">
+          <div className="space-y-6 animate-in fade-in duration-300">
+            {/* Summary Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-sm flex items-center justify-between">
+                <div>
+                  <p className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Total Tiket Gangguan</p>
+                  <p className="text-2xl font-black text-slate-900 mt-1">{supportTickets.length}</p>
+                </div>
+                <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="bg-white rounded-2xl border border-amber-200/80 p-4 shadow-sm flex items-center justify-between">
+                <div>
+                  <p className="text-[10px] font-extrabold text-amber-600 uppercase tracking-wider">Sedang Ditangani (Belum Selesai)</p>
+                  <p className="text-2xl font-black text-amber-600 mt-1">
+                    {supportTickets.filter((t) => t.status !== 'resolved').length}
+                  </p>
+                </div>
+                <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center">
+                  <RefreshCw className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="bg-white rounded-2xl border border-emerald-200/80 p-4 shadow-sm flex items-center justify-between">
+                <div>
+                  <p className="text-[10px] font-extrabold text-emerald-600 uppercase tracking-wider">Selesai Diperbaiki</p>
+                  <p className="text-2xl font-black text-emerald-600 mt-1">
+                    {supportTickets.filter((t) => t.status === 'resolved').length}
+                  </p>
+                </div>
+                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                  <CheckCircle className="w-5 h-5" />
+                </div>
+              </div>
+            </div>
+
             <div className="bg-white rounded-2xl border border-slate-200/80 shadow-md p-6 space-y-4">
-              <h3 className="font-extrabold text-sm text-slate-900 uppercase tracking-wider pb-1 border-b border-slate-100">
-                Laporan Keluhan & Gangguan WiFi Pelanggan
-              </h3>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                <div>
+                  <h3 className="font-extrabold text-sm text-slate-900 uppercase tracking-wider">
+                    Laporan Keluhan & Gangguan WiFi Pelanggan
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Ubah status tiket menjadi <strong className="text-emerald-700">Selesai</strong> agar pelanggan langsung mengetahui di portal mereka bahwa gangguan sudah teratasi.
+                  </p>
+                </div>
+              </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse min-w-[600px]">
+                <table className="w-full text-left border-collapse min-w-[760px]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase">
-                      <th className="py-3 px-4">Nama Pelanggan</th>
+                      <th className="py-3 px-4">ID & Pelanggan</th>
                       <th className="py-3 px-4">Kontak</th>
                       <th className="py-3 px-4">Pesan Laporan Kendala</th>
                       <th className="py-3 px-4">Tanggal Masuk</th>
-                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Status Saat Ini</th>
+                      <th className="py-3 px-4 text-right">Menu Pilihan Status & Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs text-slate-600">
                     {supportTickets.length > 0 ? (
-                      supportTickets.map((t) => (
-                        <tr key={t.id} className="hover:bg-slate-50/50">
-                          <td className="py-3.5 px-4 font-bold text-slate-900">{t.userName}</td>
-                          <td className="py-3.5 px-4 font-mono text-[11px]">{t.phone} <br /> <span className="text-slate-400 font-sans text-[10px]">{t.email}</span></td>
-                          <td className="py-3.5 px-4 max-w-[300px] leading-relaxed text-slate-600">{t.message}</td>
-                          <td className="py-3.5 px-4">{t.date}</td>
-                          <td className="py-3.5 px-4">
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-extrabold text-[9px] uppercase ${
-                              t.status === 'resolved' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800 animate-pulse'
-                            }`}>
-                              {t.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
+                      supportTickets.map((t) => {
+                        const isResolved = t.status === 'resolved';
+                        const handleStatusChange = async (newStatus: 'open' | 'resolved') => {
+                          if (onUpdateTicketStatus) {
+                            await onUpdateTicketStatus(t.id, newStatus);
+                          } else {
+                            updateLocalTicketStatus(t.id, newStatus);
+                            onRefreshData();
+                          }
+                          showToast(
+                            newStatus === 'resolved'
+                              ? `Tiket ${t.id} (${t.userName}) ditandai SELESAI! Pelanggan kini melihat status gangguan telah selesai.`
+                              : `Status tiket ${t.id} dikembalikan ke Dalam Penanganan.`,
+                            'success'
+                          );
+                        };
+
+                        const waResolvedText = encodeURIComponent(
+                          `Halo *${t.userName}*,\n\nKami dari *${companySettings?.name || 'Patas.Net'}* menginformasikan bahwa laporan gangguan WiFi Anda dengan ID Tiket *${t.id}* ("_${t.message}_") telah *SELESAI DIPERBAIKI* oleh tim teknisi kami.\n\nSilakan cek kembali koneksi internet Anda. Terima kasih atas kepercayaan Anda!`
+                        );
+                        const waUrl = `https://wa.me/${formatWhatsAppNumber(t.phone)}?text=${waResolvedText}`;
+
+                        return (
+                          <tr key={t.id} className={`hover:bg-slate-50/70 transition ${isResolved ? 'bg-emerald-50/20' : ''}`}>
+                            <td className="py-3.5 px-4">
+                              <span className="inline-block font-mono text-[10px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded mb-0.5">
+                                {t.id}
+                              </span>
+                              <div className="font-bold text-slate-900">{t.userName}</div>
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-[11px]">
+                              {t.phone}
+                              <br />
+                              <span className="text-slate-400 font-sans text-[10px]">{t.email}</span>
+                            </td>
+                            <td className="py-3.5 px-4 max-w-[280px] leading-relaxed text-slate-700 font-medium">
+                              {t.message}
+                            </td>
+                            <td className="py-3.5 px-4 text-[11px] text-slate-500">{t.date}</td>
+                            <td className="py-3.5 px-4">
+                              {isResolved ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-extrabold text-[10px] uppercase bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                  <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                                  Selesai Diperbaiki
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-extrabold text-[10px] uppercase bg-amber-100 text-amber-800 border border-amber-200 animate-pulse">
+                                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                                  Dalam Penanganan
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-right">
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                {/* Menu Pilihan Status Dropdown */}
+                                <select
+                                  value={isResolved ? 'resolved' : 'open'}
+                                  onChange={(e) =>
+                                    handleStatusChange(e.target.value as 'open' | 'resolved')
+                                  }
+                                  className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-extrabold focus:outline-none focus:ring-2 transition cursor-pointer ${
+                                    isResolved
+                                      ? 'bg-emerald-50 border-emerald-300 text-emerald-800 focus:ring-emerald-500'
+                                      : 'bg-amber-50 border-amber-300 text-amber-800 focus:ring-amber-500'
+                                  }`}
+                                >
+                                  <option value="open">⏳ Dalam Penanganan</option>
+                                  <option value="resolved">✅ Selesai (Teratasi)</option>
+                                </select>
+
+                                {/* Quick Action Button */}
+                                {!isResolved ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStatusChange('resolved')}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-[11px] shadow-sm transition active:scale-95"
+                                    title="Tandai tiket gangguan ini sudah selesai"
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                    <span>Tandai Selesai</span>
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStatusChange('open')}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold text-[10px] transition"
+                                    title="Buka kembali tiket gangguan"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Buka Lagi</span>
+                                  </button>
+                                )}
+
+                                {/* Direct WhatsApp Notification to Customer */}
+                                {t.phone && (
+                                  <a
+                                    href={waUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-green-50 hover:bg-green-100 text-green-700 border border-green-200 rounded-xl font-bold text-[10px] transition"
+                                    title="Kabari pelanggan via WhatsApp bahwa gangguan sudah selesai"
+                                  >
+                                    <MessageSquare className="w-3 h-3" />
+                                    <span>WA Pelanggan</span>
+                                  </a>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
                     ) : (
                       <tr>
-                        <td colSpan={5} className="py-12 text-center text-slate-400 font-bold">
+                        <td colSpan={6} className="py-12 text-center text-slate-400 font-bold">
                           Tidak ada tiket laporan gangguan saat ini.
                         </td>
                       </tr>
@@ -2082,16 +2464,34 @@ function doPost(e) {
         {/* TAB 5: WIFI PACKAGES MANAGEMENT */}
         {activeTab === 'packages' && (
           <div className="space-y-8 animate-in fade-in duration-300">
-            {/* Form Add Package */}
+            {/* Form Add / Edit Package */}
             <div className="bg-white rounded-3xl border border-slate-200/80 shadow-md p-6 space-y-6">
-              <div className="flex items-center gap-3 pb-3 border-b border-slate-100">
-                <div className="p-3 bg-blue-50 text-blue-600 rounded-2xl">
-                  <Wifi className="w-6 h-6" />
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className={`p-3 rounded-2xl ${editingPkgId ? 'bg-amber-50 text-amber-600' : 'bg-blue-50 text-blue-600'}`}>
+                    {editingPkgId ? <Edit3 className="w-6 h-6" /> : <Wifi className="w-6 h-6" />}
+                  </div>
+                  <div>
+                    <h3 className="text-base font-extrabold text-slate-900">
+                      {editingPkgId ? `Edit Paket WiFi (${newPkgName || editingPkgId})` : 'Kelola Paket Langganan WiFi'}
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      {editingPkgId
+                        ? 'Ubah nama, kecepatan, harga, atau fitur paket lalu klik Simpan Perubahan Paket.'
+                        : 'Tambah paket baru, edit paket yang sudah ada, atau hapus paket yang tidak aktif. Otomatis tersinkron ke seluruh perangkat.'}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-base font-extrabold text-slate-900">Kelola Paket Langganan WiFi</h3>
-                  <p className="text-xs text-slate-400">Tambah paket baru atau hapus paket yang sudah tidak aktif.</p>
-                </div>
+                {editingPkgId && (
+                  <button
+                    type="button"
+                    onClick={handleCancelEditPackage}
+                    className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition flex items-center gap-1.5 self-start sm:self-auto"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Batal Edit</span>
+                  </button>
+                )}
               </div>
 
               <form onSubmit={handleAddPackage} className="space-y-4 max-w-2xl">
@@ -2171,13 +2571,28 @@ function doPost(e) {
                   </label>
                 </div>
 
-                <button
-                  type="submit"
-                  className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs transition shadow-md shadow-blue-600/20 flex items-center gap-2"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Tambah Paket WiFi</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="submit"
+                    className={`px-6 py-2.5 text-white font-bold rounded-xl text-xs transition shadow-md flex items-center gap-2 ${
+                      editingPkgId
+                        ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20'
+                        : 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/20'
+                    }`}
+                  >
+                    {editingPkgId ? <Save className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                    <span>{editingPkgId ? 'Simpan Perubahan Paket' : 'Tambah Paket WiFi'}</span>
+                  </button>
+                  {editingPkgId && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditPackage}
+                      className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
+                    >
+                      Batal
+                    </button>
+                  )}
+                </div>
               </form>
             </div>
 
@@ -2187,14 +2602,16 @@ function doPost(e) {
                 <h3 className="font-extrabold text-sm text-slate-900 uppercase tracking-wider">
                   Daftar Paket WiFi Aktif ({packagesList.length})
                 </h3>
-                <button
-                  type="button"
-                  onClick={fetchPackagesList}
-                  className="p-1.5 text-slate-500 hover:text-blue-600 rounded-lg border border-slate-200"
-                  title="Refresh Paket"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingPackages ? 'animate-spin' : ''}`} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={fetchPackagesList}
+                    className="p-1.5 text-slate-500 hover:text-blue-600 rounded-lg border border-slate-200"
+                    title="Refresh Paket"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingPackages ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
               </div>
 
               {loadingPackages ? (
@@ -2211,7 +2628,11 @@ function doPost(e) {
                   {packagesList.map((pkg) => (
                     <div
                       key={pkg.id}
-                      className="border border-slate-200 rounded-2xl p-5 bg-white shadow-sm flex flex-col justify-between space-y-4 hover:border-blue-300 transition"
+                      className={`border rounded-2xl p-5 bg-white shadow-sm flex flex-col justify-between space-y-4 transition ${
+                        editingPkgId === pkg.id
+                          ? 'border-amber-400 ring-2 ring-amber-200 bg-amber-50/10'
+                          : 'border-slate-200 hover:border-blue-300'
+                      }`}
                     >
                       <div className="space-y-2">
                         <div className="flex justify-between items-start">
@@ -2250,16 +2671,28 @@ function doPost(e) {
                         )}
                       </div>
 
-                      <div className="pt-3 border-t border-slate-100 flex justify-between items-center">
-                        <span className="text-[9px] font-mono text-slate-400">ID: {pkg.id}</span>
-                        <button
-                          type="button"
-                          onClick={() => setPackageToDelete(pkg)}
-                          className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-bold text-[10px] transition flex items-center gap-1"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                          <span>Hapus Paket</span>
-                        </button>
+                      <div className="pt-3 border-t border-slate-100 flex justify-between items-center gap-2">
+                        <span className="text-[9px] font-mono text-slate-400 truncate max-w-[100px]" title={pkg.id}>
+                          ID: {pkg.id}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleStartEditPackage(pkg)}
+                            className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg font-bold text-[10px] transition flex items-center gap-1"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            <span>Edit</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPackageToDelete(pkg)}
+                            className="px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-bold text-[10px] transition flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Hapus</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -2591,10 +3024,10 @@ function doPost(e) {
                 {/* Bagian 5: Upload Logo Global */}
                 <div className="bg-slate-50/70 p-5 rounded-2xl border border-slate-200/60 space-y-4">
                   <h4 className="font-black text-xs text-slate-800 uppercase tracking-wider flex items-center gap-2">
-                    <ImageIcon className="w-4 h-4 text-pink-600" /> 5. Upload & Ganti Logo Global (Terganti di Seluruh Halaman)
+                    <ImageIcon className="w-4 h-4 text-pink-600" /> 5. Upload & Ganti Logo Global (Otomatis Termasuk Favicon Browser)
                   </h4>
                   <p className="text-xs text-slate-500">
-                    Setiap logo diganti di sini, seluruh logo di Home, Navbar, Footer, Dashboard Admin, Developer, dan Pelanggan otomatis akan terganti secara instan oleh gambar logo yang Anda unggah.
+                    Setiap logo diganti di sini, seluruh logo di Home, Navbar, Footer, Favicon Tab Browser, Dashboard Admin, dan Pelanggan otomatis akan terganti secara instan oleh gambar logo yang Anda unggah.
                   </p>
                   <div className="flex flex-col sm:flex-row items-center gap-4 p-4 border border-slate-200 rounded-2xl bg-white shadow-xs">
                     {companyLogoUrlInput ? (
@@ -2646,12 +3079,134 @@ function doPost(e) {
                   </div>
                 </div>
 
-                {/* Submit button */}
-                <div className="pt-2 flex justify-end">
+                {/* Bagian 6: Slide Foto Transparan Background Hero */}
+                <div className="bg-slate-50/70 p-5 rounded-2xl border border-slate-200/60 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h4 className="font-black text-xs text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                        <ImageIcon className="w-4 h-4 text-indigo-600" /> 6. Slide Foto Transparan Background Beranda (Hero Banner)
+                      </h4>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Kelola daftar foto slide transparan yang tampil bergantian di latar belakang bagian atas halaman utama (Hero Section).
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHeroSlidesList(DEFAULT_HERO_SLIDES);
+                        showToast('Slide foto background dikembalikan ke foto default.');
+                      }}
+                      className="px-3 py-1.5 bg-slate-200/80 hover:bg-slate-300 text-slate-700 rounded-xl font-bold text-[11px] transition shrink-0 self-start"
+                    >
+                      Reset Slide Default
+                    </button>
+                  </div>
+
+                  {/* Add Slide by URL or File Upload */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-4 bg-white rounded-2xl border border-slate-200">
+                    <div className="space-y-1.5">
+                      <label className="block font-bold text-slate-700 uppercase text-[10px]">
+                        Tambah via Link Gambar / Google Drive URL
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={newHeroSlideUrl}
+                          onChange={(e) => setNewHeroSlideUrl(e.target.value)}
+                          placeholder="https://images.unsplash.com/... atau link Google Drive"
+                          className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-xs bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!newHeroSlideUrl.trim()) return;
+                            const normalized = normalizeGoogleDriveImageUrl(newHeroSlideUrl.trim());
+                            setHeroSlidesList((prev) => [...prev, normalized]);
+                            setNewHeroSlideUrl('');
+                            showToast('Foto slide ditambahkan! Klik Simpan Perubahan untuk menerapkan.');
+                          }}
+                          className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition flex items-center gap-1 shrink-0"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Tambah
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block font-bold text-slate-700 uppercase text-[10px]">
+                        Atau Unggah File Foto Slide dari Perangkat
+                      </label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          const reader = new FileReader();
+                          reader.onloadend = () => {
+                            const base64 = reader.result as string;
+                            setHeroSlidesList((prev) => [...prev, base64]);
+                            showToast('Foto slide berhasil dimuat! Klik Simpan Perubahan untuk menyimpan.');
+                          };
+                          reader.readAsDataURL(file);
+                          e.target.value = '';
+                        }}
+                        className="text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer w-full"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Current Slides Preview Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {heroSlidesList.map((slideUrl, idx) => (
+                      <div
+                        key={idx}
+                        className="relative group rounded-xl overflow-hidden border border-slate-200 bg-slate-900 aspect-video shadow-xs"
+                      >
+                        <img
+                          src={slideUrl}
+                          alt={`Hero Slide ${idx + 1}`}
+                          className="w-full h-full object-cover opacity-85 group-hover:opacity-100 transition"
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute top-1.5 left-1.5 bg-slate-950/75 text-white text-[10px] font-bold px-2 py-0.5 rounded-md">
+                          Slide #{idx + 1}
+                        </div>
+                        {heroSlidesList.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setHeroSlidesList((prev) => prev.filter((_, i) => i !== idx));
+                            }}
+                            className="absolute top-1.5 right-1.5 p-1 bg-red-600 hover:bg-red-700 text-white rounded-lg shadow transition"
+                            title="Hapus Slide Ini"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Submit button & Inline Save Confirmation */}
+                <div className="pt-2 flex flex-col sm:flex-row items-center justify-end gap-3">
+                  {toast && (
+                    <div
+                      className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 ${
+                        toast.type === 'success'
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          : 'bg-red-50 text-red-800 border border-red-200'
+                      }`}
+                    >
+                      <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>{toast.message}</span>
+                    </div>
+                  )}
                   <button
                     type="submit"
                     disabled={savingSettings}
-                    className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-2xl transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 text-xs"
+                    className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-2xl transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 text-xs active:scale-95"
                   >
                     <Save className="w-4 h-4" />
                     <span>{savingSettings ? 'Menyimpan Perubahan...' : 'Simpan Seluruh Informasi Website'}</span>
@@ -2961,13 +3516,20 @@ function doPost(e) {
         {/* TAB 7: COVERAGE AREA MANAGEMENT */}
         {activeTab === 'coverage' && (
           <div className="bg-white rounded-3xl border border-slate-200/80 shadow-md p-6 space-y-6 animate-in fade-in duration-300">
-            <div>
-              <h3 className="font-extrabold text-sm text-slate-900 uppercase tracking-wider pb-1 border-b border-slate-100 flex items-center gap-2">
-                <MapPin className="w-5 h-5 text-blue-600" /> Pengaturan Area Jangkauan / Cakupan WiFi
-              </h3>
-              <p className="text-slate-500 leading-relaxed mt-2 text-xs">
-                Kelola daerah jangkauan internet WiFi Anda secara dinamis. Anda bisa menambah kota/kabupaten baru, mendaftarkan kecamatan, hingga mengaktifkan kelurahan/desa beserta status nodenya.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-100">
+              <div>
+                <h3 className="font-extrabold text-sm text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <MapPin className="w-5 h-5 text-blue-600" /> Pengaturan Area Jangkauan / Cakupan WiFi
+                </h3>
+                <p className="text-slate-500 leading-relaxed mt-1 text-xs">
+                  Tambah, ubah (edit), atau hapus Kota/Kabupaten, Kecamatan, serta Kelurahan/Desa beserta jumlah titik ODP (Nodes). Semua perubahan otomatis tersinkron ke Peta Cakupan Beranda & Google Sheets.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-xl font-extrabold text-[10px]">
+                  {computeCoverageSummaryText(coverageList)}
+                </span>
+              </div>
             </div>
 
             {/* FORM ADD CITY/KABUPATEN */}
@@ -2978,7 +3540,7 @@ function doPost(e) {
                   type="text"
                   value={newCityName}
                   onChange={(e) => setNewCityName(e.target.value)}
-                  placeholder="Contoh: Depok, Bogor, Bekasi"
+                  placeholder="Contoh: Tasikmalaya, Ciamis, Garut, Bandung"
                   className="w-full px-3 py-2 border border-slate-200 bg-white rounded-xl focus:ring-1 focus:ring-blue-600 text-xs"
                   required
                 />
@@ -2996,9 +3558,10 @@ function doPost(e) {
               </div>
               <button
                 type="submit"
-                className="w-full sm:w-auto px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition text-xs shrink-0"
+                className="w-full sm:w-auto px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition text-xs shrink-0 flex items-center justify-center gap-1.5"
               >
-                Tambah Wilayah
+                <Plus className="w-4 h-4" />
+                <span>Tambah Wilayah</span>
               </button>
             </form>
 
@@ -3013,122 +3576,722 @@ function doPost(e) {
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-6">
-                {coverageList.map((city) => (
-                  <div key={city.cityName} className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden">
-                    {/* City Header */}
-                    <div className="bg-slate-50 border-b border-slate-200 px-5 py-4 flex items-center justify-between">
-                      <div>
-                        <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded-md font-extrabold text-[9px] uppercase tracking-wider mr-2">
-                          {city.regionType}
-                        </span>
-                        <strong className="text-sm text-slate-800 uppercase tracking-tight">{city.cityName}</strong>
+                {coverageList.map((city) => {
+                  const isEditingThisCity = editingCity && editingCity.oldName === city.cityName;
+                  return (
+                    <div key={city.cityName} className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden">
+                      {/* City Header */}
+                      <div className="bg-slate-50 border-b border-slate-200 px-5 py-4 flex flex-wrap items-center justify-between gap-3">
+                        {isEditingThisCity ? (
+                          <div className="flex flex-wrap items-center gap-2 flex-1">
+                            <select
+                              value={editingCity.regionType}
+                              onChange={(e) => setEditingCity({ ...editingCity, regionType: e.target.value })}
+                              className="px-2.5 py-1.5 border border-blue-300 bg-white rounded-lg text-xs font-bold"
+                            >
+                              <option value="Kota">Kota</option>
+                              <option value="Kabupaten">Kabupaten</option>
+                            </select>
+                            <input
+                              type="text"
+                              value={editingCity.newName}
+                              onChange={(e) => setEditingCity({ ...editingCity, newName: e.target.value })}
+                              className="px-3 py-1.5 border border-blue-300 bg-white rounded-lg text-xs font-bold flex-1 min-w-[160px]"
+                              placeholder="Nama Kota/Kabupaten"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleSaveEditCity}
+                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Simpan</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingCity(null)}
+                              className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg font-bold text-xs"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded-md font-extrabold text-[9px] uppercase tracking-wider">
+                              {city.regionType}
+                            </span>
+                            <strong className="text-sm text-slate-800 uppercase tracking-tight">{city.cityName}</strong>
+                            <span className="text-[10px] text-slate-400 font-semibold">
+                              ({(city.kecamatans || []).length} Kec.)
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-1.5">
+                          {!isEditingThisCity && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingCity({
+                                  oldName: city.cityName,
+                                  newName: city.cityName,
+                                  regionType: city.regionType || 'Kota',
+                                })
+                              }
+                              className="px-2.5 py-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition font-bold text-[10px] flex items-center gap-1"
+                              title="Ubah Nama Kota/Kabupaten"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              <span>Edit Wilayah</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setCityToDelete(city.cityName)}
+                            className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition"
+                            title="Hapus Kota/Kabupaten ini"
+                          >
+                            <Trash className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setCityToDelete(city.cityName)}
-                        className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition"
-                        title="Hapus Kota/Kabupaten ini"
+
+                      <div className="p-5 space-y-4">
+                        {/* Form Add Kecamatan */}
+                        <div className="flex gap-2 max-w-md">
+                          <input
+                            type="text"
+                            placeholder="Masukkan nama Kecamatan baru..."
+                            value={newKecName[city.cityName] || ''}
+                            onChange={(e) => setNewKecName((prev) => ({ ...prev, [city.cityName]: e.target.value }))}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleAddKecamatan(city.cityName);
+                              }
+                            }}
+                            className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-1 focus:ring-blue-600 text-xs"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleAddKecamatan(city.cityName)}
+                            className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-xl transition text-xs shrink-0 flex items-center gap-1"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Tambah Kec.</span>
+                          </button>
+                        </div>
+
+                        {/* Kecamatan List */}
+                        {city.kecamatans && city.kecamatans.length > 0 ? (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {city.kecamatans.map((kec: any) => {
+                              const kecKey = `${city.cityName}-${kec.name}`;
+                              const isEditingThisKec =
+                                editingKec &&
+                                editingKec.cityName === city.cityName &&
+                                editingKec.oldName === kec.name;
+
+                              return (
+                                <div
+                                  key={kec.name}
+                                  className="p-4 bg-slate-50/50 rounded-xl border border-slate-100 flex flex-col justify-between"
+                                >
+                                  <div className="flex items-center justify-between border-b border-slate-200/60 pb-2 mb-2 gap-2">
+                                    {isEditingThisKec ? (
+                                      <div className="flex items-center gap-1.5 flex-1">
+                                        <input
+                                          type="text"
+                                          value={editingKec.newName}
+                                          onChange={(e) =>
+                                            setEditingKec({ ...editingKec, newName: e.target.value })
+                                          }
+                                          className="px-2 py-1 border border-blue-300 bg-white rounded text-[10px] font-bold flex-1"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={handleSaveEditKecamatan}
+                                          className="px-2 py-1 bg-emerald-600 text-white rounded text-[10px] font-bold"
+                                        >
+                                          Simpan
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setEditingKec(null)}
+                                          className="px-2 py-1 bg-slate-200 text-slate-700 rounded text-[10px] font-bold"
+                                        >
+                                          Batal
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <strong className="text-slate-800 uppercase text-[10px]">
+                                        Kecamatan {kec.name}
+                                      </strong>
+                                    )}
+
+                                    <div className="flex items-center gap-1">
+                                      {!isEditingThisKec && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setEditingKec({
+                                              cityName: city.cityName,
+                                              oldName: kec.name,
+                                              newName: kec.name,
+                                            })
+                                          }
+                                          className="p-1 text-blue-600 hover:bg-blue-50 rounded transition"
+                                          title="Edit Nama Kecamatan"
+                                        >
+                                          <Edit3 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => setKecToDelete({ cityName: city.cityName, name: kec.name })}
+                                        className="p-1 text-red-500 hover:bg-red-50 rounded transition"
+                                        title="Hapus Kecamatan"
+                                      >
+                                        <Trash className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* Form Add Kelurahan */}
+                                  <div className="flex gap-1.5 mb-3">
+                                    <input
+                                      type="text"
+                                      placeholder="Kelurahan/Desa baru..."
+                                      value={newKelName[kecKey] || ''}
+                                      onChange={(e) => setNewKelName((prev) => ({ ...prev, [kecKey]: e.target.value }))}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          e.preventDefault();
+                                          handleAddKelurahan(city.cityName, kec.name);
+                                        }
+                                      }}
+                                      className="flex-1 px-2.5 py-1.5 border border-slate-200 bg-white rounded-lg focus:ring-1 focus:ring-blue-600 text-[10px]"
+                                    />
+                                    <input
+                                      type="number"
+                                      placeholder="ODP"
+                                      title="Jumlah Titik ODP / Nodes"
+                                      value={newKelNodes[kecKey] || ''}
+                                      onChange={(e) =>
+                                        setNewKelNodes((prev) => ({ ...prev, [kecKey]: e.target.value }))
+                                      }
+                                      className="w-16 px-2 py-1.5 border border-slate-200 bg-white rounded-lg focus:ring-1 focus:ring-blue-600 text-[10px] font-mono"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAddKelurahan(city.cityName, kec.name)}
+                                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition text-[10px] shrink-0"
+                                    >
+                                      + Kel.
+                                    </button>
+                                  </div>
+
+                                  {/* Kelurahan Sub-list */}
+                                  {kec.kelurahans && kec.kelurahans.length > 0 ? (
+                                    <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+                                      {kec.kelurahans.map((kel: any) => {
+                                        const isEditingThisKel =
+                                          editingKel &&
+                                          editingKel.cityName === city.cityName &&
+                                          editingKel.kecamatanName === kec.name &&
+                                          editingKel.oldName === kel.name;
+
+                                        return (
+                                          <div
+                                            key={kel.name}
+                                            className="flex items-center justify-between px-2 py-1.5 bg-white border border-slate-200/50 rounded-lg text-[10px] gap-1.5"
+                                          >
+                                            {isEditingThisKel ? (
+                                              <div className="flex items-center gap-1 flex-1">
+                                                <input
+                                                  type="text"
+                                                  value={editingKel.newName}
+                                                  onChange={(e) =>
+                                                    setEditingKel({ ...editingKel, newName: e.target.value })
+                                                  }
+                                                  className="px-1.5 py-0.5 border border-blue-300 rounded text-[10px] flex-1 min-w-[80px]"
+                                                />
+                                                <input
+                                                  type="number"
+                                                  value={editingKel.nodesCount}
+                                                  onChange={(e) =>
+                                                    setEditingKel({
+                                                      ...editingKel,
+                                                      nodesCount: Number(e.target.value) || 1,
+                                                    })
+                                                  }
+                                                  className="w-14 px-1.5 py-0.5 border border-blue-300 rounded text-[10px] font-mono"
+                                                  title="Jumlah Nodes ODP"
+                                                />
+                                                <button
+                                                  type="button"
+                                                  onClick={handleSaveEditKelurahan}
+                                                  className="px-1.5 py-0.5 bg-emerald-600 text-white rounded text-[9px] font-bold"
+                                                >
+                                                  OK
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => setEditingKel(null)}
+                                                  className="px-1.5 py-0.5 bg-slate-200 text-slate-700 rounded text-[9px]"
+                                                >
+                                                  X
+                                                </button>
+                                              </div>
+                                            ) : (
+                                              <>
+                                                <div className="flex items-center gap-1.5">
+                                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                                  <span className="text-slate-700 font-medium">{kel.name}</span>
+                                                </div>
+                                                <div className="flex items-center gap-1.5">
+                                                  <span className="text-[9px] font-mono text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                                    {kel.nodesCount || 0} Nodes
+                                                  </span>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      setEditingKel({
+                                                        cityName: city.cityName,
+                                                        kecamatanName: kec.name,
+                                                        oldName: kel.name,
+                                                        newName: kel.name,
+                                                        nodesCount: Number(kel.nodesCount) || 10,
+                                                      })
+                                                    }
+                                                    className="p-0.5 text-slate-400 hover:text-blue-600 transition"
+                                                    title="Ubah Kelurahan & Jumlah Nodes"
+                                                  >
+                                                    <Edit3 className="w-3 h-3" />
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      setKelToDelete({
+                                                        cityName: city.cityName,
+                                                        kecamatanName: kec.name,
+                                                        name: kel.name,
+                                                      })
+                                                    }
+                                                    className="p-0.5 text-slate-400 hover:text-red-500 transition"
+                                                    title="Hapus Kelurahan"
+                                                  >
+                                                    <Trash className="w-3 h-3" />
+                                                  </button>
+                                                </div>
+                                              </>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <span className="text-[9px] text-slate-400 italic">
+                                      Belum ada kelurahan terdaftar.
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-slate-400 italic bg-slate-50 p-3 rounded-xl border border-dashed">
+                            Belum ada kecamatan terdaftar. Silakan tambah di atas.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 7B: WHATSAPP API GATEWAY & NEW CUSTOMER NOTIFICATION */}
+        {activeTab === 'whatsapp_api' && (
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="bg-white rounded-3xl border border-slate-200/80 shadow-md p-6 sm:p-8 space-y-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-5 border-b border-slate-100">
+                <div className="space-y-1">
+                  <span className="text-[10px] bg-emerald-100 text-emerald-800 px-3 py-1 rounded-full font-extrabold uppercase tracking-wider inline-flex items-center gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5" /> WhatsApp Gateway & Auto-Notifikasi Pelanggan Baru
+                  </span>
+                  <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+                    Pengaturan API WhatsApp & Notifikasi Otomatis
+                  </h2>
+                  <p className="text-xs text-slate-500 leading-relaxed max-w-2xl">
+                    Hubungkan website langsung ke WhatsApp Admin & Pelanggan menggunakan Gateway API (<strong>Fonnte</strong>, <strong>Wablas</strong>, <strong>UltraMsg</strong>, atau <strong>Custom Webhook</strong>) agar setiap ada pelanggan baru mendaftar, detail pendaftaran & link Google Maps lokasi pemasangan langsung terkirim ke WhatsApp!
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span
+                    className={`px-3 py-1.5 rounded-xl font-extrabold text-[10px] flex items-center gap-1.5 ${
+                      waConfig.enabled && waConfig.apiKey
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        : 'bg-amber-100 text-amber-800 border border-amber-200'
+                    }`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        waConfig.enabled && waConfig.apiKey ? 'bg-emerald-500 animate-ping' : 'bg-amber-500'
+                      }`}
+                    />
+                    {waConfig.enabled && waConfig.apiKey ? 'API Gateway Aktif' : 'Mode Direct WA + Siap Pasang Token'}
+                  </span>
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveWhatsAppConfig} className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Left column: Provider & Credentials */}
+                  <div className="space-y-4 bg-slate-50/70 p-5 rounded-2xl border border-slate-200/70">
+                    <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
+                      <Zap className="w-4 h-4 text-emerald-600" /> 1. Pilih Provider & Token API WhatsApp
+                    </h3>
+
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-slate-700 uppercase">
+                        Provider WhatsApp Gateway
+                      </label>
+                      <select
+                        value={waConfig.provider}
+                        onChange={(e) =>
+                          setWaConfig((prev) => ({
+                            ...prev,
+                            provider: e.target.value as WhatsAppApiConfig['provider'],
+                            endpointUrl:
+                              e.target.value === 'fonnte'
+                                ? 'https://api.fonnte.com/send'
+                                : e.target.value === 'wablas'
+                                ? 'https://pati.wablas.com/api/send-message'
+                                : prev.endpointUrl,
+                          }))
+                        }
+                        className="w-full px-3 py-2.5 border border-slate-200 bg-white rounded-xl text-xs font-bold focus:ring-2 focus:ring-emerald-600"
                       >
-                        <Trash className="w-4 h-4" />
-                      </button>
+                        <option value="fonnte">Fonnte (Rekomendasi #1 di Indonesia - Mudah & Gratis Uji Coba)</option>
+                        <option value="wablas">Wablas WhatsApp Gateway</option>
+                        <option value="ultramsg">UltraMsg (Cloud WhatsApp API)</option>
+                        <option value="custom">Custom REST Webhook / WAHA / Baileys Server</option>
+                      </select>
                     </div>
 
-                    <div className="p-5 space-y-4">
-                      {/* Form Add Kecamatan */}
-                      <div className="flex gap-2 max-w-md">
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-slate-700 uppercase">
+                        API Key / Token WhatsApp Gateway *
+                      </label>
+                      <input
+                        type="text"
+                        value={waConfig.apiKey}
+                        onChange={(e) => setWaConfig((prev) => ({ ...prev, apiKey: e.target.value }))}
+                        placeholder={
+                          waConfig.provider === 'fonnte'
+                            ? 'Masukkan Token Perangkat Fonnte Anda (contoh: xYz123AbC...)'
+                            : 'Masukkan API Key / Token Anda'
+                        }
+                        className="w-full px-3 py-2.5 border border-slate-200 bg-white rounded-xl text-xs font-mono focus:ring-2 focus:ring-emerald-600"
+                      />
+                      <p className="text-[10px] text-slate-500">
+                        Dapatkan Token dari dashboard provider pilihan Anda (lihat petunjuk lengkap di bawah).
+                      </p>
+                    </div>
+
+                    {(waConfig.provider === 'wablas' ||
+                      waConfig.provider === 'ultramsg' ||
+                      waConfig.provider === 'custom') && (
+                      <div className="space-y-3">
+                        <div className="space-y-1">
+                          <label className="block text-[10px] font-bold text-slate-700 uppercase">
+                            URL Endpoint API
+                          </label>
+                          <input
+                            type="text"
+                            value={waConfig.endpointUrl}
+                            onChange={(e) => setWaConfig((prev) => ({ ...prev, endpointUrl: e.target.value }))}
+                            placeholder="https://api.fonnte.com/send"
+                            className="w-full px-3 py-2 border border-slate-200 bg-white rounded-xl text-xs font-mono"
+                          />
+                        </div>
+                        {waConfig.provider === 'ultramsg' && (
+                          <div className="space-y-1">
+                            <label className="block text-[10px] font-bold text-slate-700 uppercase">
+                              Instance ID (Khusus UltraMsg)
+                            </label>
+                            <input
+                              type="text"
+                              value={waConfig.instanceId || ''}
+                              onChange={(e) => setWaConfig((prev) => ({ ...prev, instanceId: e.target.value }))}
+                              placeholder="Contoh: instance98765"
+                              className="w-full px-3 py-2 border border-slate-200 bg-white rounded-xl text-xs font-mono"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-slate-700 uppercase">
+                        Nomor WhatsApp Admin Penerima Pendaftaran Baru *
+                      </label>
+                      <input
+                        type="text"
+                        value={waConfig.adminPhone}
+                        onChange={(e) => setWaConfig((prev) => ({ ...prev, adminPhone: e.target.value }))}
+                        placeholder="Contoh: 081234567890 atau 6281234567890"
+                        className="w-full px-3 py-2.5 border border-slate-200 bg-white rounded-xl text-xs font-bold focus:ring-2 focus:ring-emerald-600"
+                      />
+                      <p className="text-[10px] text-slate-500">
+                        Nomor ini akan menerima pesan otomatis berisi data pelanggan baru & titik koordinat GPS Google Maps.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Right column: Automation Switches & Live Test */}
+                  <div className="space-y-4 bg-slate-50/70 p-5 rounded-2xl border border-slate-200/70 flex flex-col justify-between">
+                    <div className="space-y-3">
+                      <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-800 flex items-center gap-2">
+                        <Bell className="w-4 h-4 text-emerald-600" /> 2. Opsi Otomatisasi Saat Pelanggan Mendaftar
+                      </h3>
+
+                      <label className="flex items-start gap-3 p-3 bg-white rounded-xl border border-slate-200 cursor-pointer hover:border-emerald-400 transition">
+                        <input
+                          type="checkbox"
+                          checked={waConfig.enabled}
+                          onChange={(e) => setWaConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
+                          className="w-4 h-4 text-emerald-600 rounded mt-0.5"
+                        />
+                        <div>
+                          <span className="font-bold text-slate-800 block text-xs">
+                            Aktifkan Pengiriman Otomatis via API Gateway (Background)
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            Saat pelanggan klik Daftar, sistem otomatis mengirim pesan WA di belakang layar tanpa perlu klik manual.
+                          </span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-3 p-3 bg-white rounded-xl border border-slate-200 cursor-pointer hover:border-emerald-400 transition">
+                        <input
+                          type="checkbox"
+                          checked={waConfig.sendToAdminOnRegister}
+                          onChange={(e) =>
+                            setWaConfig((prev) => ({ ...prev, sendToAdminOnRegister: e.target.checked }))
+                          }
+                          className="w-4 h-4 text-emerald-600 rounded mt-0.5"
+                        />
+                        <div>
+                          <span className="font-bold text-slate-800 block text-xs">
+                            Kirim Notifikasi Pelanggan Baru ke Nomor WA Admin
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            Admin langsung mendapat nama, nomor HP, paket, alamat, dan link Google Maps koordinat rumah pelanggan.
+                          </span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-3 p-3 bg-white rounded-xl border border-slate-200 cursor-pointer hover:border-emerald-400 transition">
+                        <input
+                          type="checkbox"
+                          checked={waConfig.sendToCustomerOnRegister}
+                          onChange={(e) =>
+                            setWaConfig((prev) => ({ ...prev, sendToCustomerOnRegister: e.target.checked }))
+                          }
+                          className="w-4 h-4 text-emerald-600 rounded mt-0.5"
+                        />
+                        <div>
+                          <span className="font-bold text-slate-800 block text-xs">
+                            Kirim Pesan Sambutan Otomatis ke WA Pelanggan Baru
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            Pelanggan baru otomatis menerima WA bukti registrasi & ID Pelanggan mereka.
+                          </span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-3 p-3 bg-white rounded-xl border border-slate-200 cursor-pointer hover:border-emerald-400 transition">
+                        <input
+                          type="checkbox"
+                          checked={waConfig.autoOpenWaRedirectOnRegister}
+                          onChange={(e) =>
+                            setWaConfig((prev) => ({ ...prev, autoOpenWaRedirectOnRegister: e.target.checked }))
+                          }
+                          className="w-4 h-4 text-emerald-600 rounded mt-0.5"
+                        />
+                        <div>
+                          <span className="font-bold text-slate-800 block text-xs">
+                            Tampilkan Tombol / Redirect Langsung ke Chat WhatsApp Admin
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            Tetap berfungsi 100% meskipun Anda belum mengisi Token API berbayar!
+                          </span>
+                        </div>
+                      </label>
+                    </div>
+
+                    {/* Live Test Box */}
+                    <div className="p-4 bg-emerald-950 text-white rounded-2xl space-y-3 border border-emerald-800">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-300 flex items-center gap-1.5">
+                          <Send className="w-3.5 h-3.5" /> Uji Coba Kirim Pesan API WhatsApp
+                        </span>
+                      </div>
+                      <div className="flex gap-2">
                         <input
                           type="text"
-                          placeholder="Masukkan nama Kecamatan baru..."
-                          value={newKecName[city.cityName] || ''}
-                          onChange={(e) => setNewKecName(prev => ({ ...prev, [city.cityName]: e.target.value }))}
-                          className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-1 focus:ring-blue-600 text-xs"
+                          value={waTestPhone}
+                          onChange={(e) => setWaTestPhone(e.target.value)}
+                          placeholder={waConfig.adminPhone || 'Nomor WA Tujuan Tes (0812...)'}
+                          className="flex-1 px-3 py-2 bg-emerald-900/70 border border-emerald-700 rounded-xl text-xs text-white placeholder:text-emerald-400/60"
                         />
                         <button
                           type="button"
-                          onClick={() => handleAddKecamatan(city.cityName)}
-                          className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold rounded-xl transition text-xs shrink-0"
+                          onClick={handleTestSendWhatsApp}
+                          disabled={waTesting}
+                          className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black rounded-xl text-xs transition shrink-0 flex items-center gap-1.5 disabled:opacity-50"
                         >
-                          Tambah Kec.
+                          {waTesting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                          <span>{waTesting ? 'Mengirim...' : 'Tes Kirim WA'}</span>
                         </button>
                       </div>
-
-                      {/* Kecamatan List */}
-                      {city.kecamatans && city.kecamatans.length > 0 ? (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {city.kecamatans.map((kec: any) => {
-                            const kecKey = `${city.cityName}-${kec.name}`;
-                            return (
-                              <div key={kec.name} className="p-4 bg-slate-50/50 rounded-xl border border-slate-100 flex flex-col justify-between">
-                                <div className="flex items-center justify-between border-b border-slate-200/60 pb-2 mb-2">
-                                  <strong className="text-slate-800 uppercase text-[10px]">Kecamatan {kec.name}</strong>
-                                  <button
-                                    type="button"
-                                    onClick={() => setKecToDelete({ cityName: city.cityName, name: kec.name })}
-                                    className="p-1 text-red-500 hover:bg-red-50 rounded transition"
-                                  >
-                                    <Trash className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-
-                                {/* Form Add Kelurahan */}
-                                <div className="flex gap-1.5 mb-3">
-                                  <input
-                                    type="text"
-                                    placeholder="Kelurahan baru..."
-                                    value={newKelName[kecKey] || ''}
-                                    onChange={(e) => setNewKelName(prev => ({ ...prev, [kecKey]: e.target.value }))}
-                                    className="flex-1 px-2.5 py-1.5 border border-slate-200 bg-white rounded-lg focus:ring-1 focus:ring-blue-600 text-[10px]"
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() => handleAddKelurahan(city.cityName, kec.name)}
-                                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition text-[10px] shrink-0"
-                                  >
-                                    Tambah
-                                  </button>
-                                </div>
-
-                                {/* Kelurahan Sub-list */}
-                                {kec.kelurahans && kec.kelurahans.length > 0 ? (
-                                  <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
-                                    {kec.kelurahans.map((kel: any) => (
-                                      <div key={kel.name} className="flex items-center justify-between px-2 py-1.5 bg-white border border-slate-200/50 rounded-lg text-[10px]">
-                                        <div className="flex items-center gap-1.5">
-                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                                          <span className="text-slate-700 font-medium">{kel.name}</span>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                          <span className="text-[9px] font-mono text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
-                                            {kel.nodesCount || 0} Nodes
-                                          </span>
-                                          <button
-                                            type="button"
-                                            onClick={() => setKelToDelete({ cityName: city.cityName, kecamatanName: kec.name, name: kel.name })}
-                                            className="p-0.5 text-slate-400 hover:text-red-500 transition"
-                                          >
-                                            <Trash className="w-3 h-3" />
-                                          </button>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <span className="text-[9px] text-slate-400 italic">Belum ada kelurahan terdaftar.</span>
-                                )}
-                              </div>
-                            );
-                          })}
+                      {waTestResult && (
+                        <div
+                          className={`p-2.5 rounded-xl text-[11px] font-semibold ${
+                            waTestResult.success
+                              ? 'bg-emerald-900/90 text-emerald-200 border border-emerald-600'
+                              : 'bg-red-900/80 text-red-200 border border-red-700'
+                          }`}
+                        >
+                          {waTestResult.message}
                         </div>
-                      ) : (
-                        <p className="text-[10px] text-slate-400 italic bg-slate-50 p-3 rounded-xl border border-dashed">
-                          Belum ada kecamatan terdaftar. Silakan tambah di atas.
-                        </p>
                       )}
                     </div>
                   </div>
-                ))}
+                </div>
+
+                {/* Template Editor */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] font-extrabold text-slate-700 uppercase">
+                      Template Pesan WhatsApp ke Admin (Saat Pelanggan Baru Daftar)
+                    </label>
+                    <textarea
+                      rows={7}
+                      value={waConfig.adminTemplate}
+                      onChange={(e) => setWaConfig((prev) => ({ ...prev, adminTemplate: e.target.value }))}
+                      className="w-full px-3.5 py-2.5 border border-slate-200 rounded-2xl text-xs font-mono bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-emerald-600"
+                    />
+                    <p className="text-[10px] text-slate-400">
+                      Variabel otomatis: <code className="text-slate-700 font-bold">{'{id}'}</code>,{' '}
+                      <code className="text-slate-700 font-bold">{'{name}'}</code>,{' '}
+                      <code className="text-slate-700 font-bold">{'{phone}'}</code>,{' '}
+                      <code className="text-slate-700 font-bold">{'{email}'}</code>,{' '}
+                      <code className="text-slate-700 font-bold">{'{package_name}'}</code>,{' '}
+                      <code className="text-slate-700 font-bold">{'{package_price}'}</code>,{' '}
+                      <code className="text-slate-700 font-bold">{'{address}'}</code>,{' '}
+                      <code className="text-slate-700 font-bold">{'{maps_link}'}</code>
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] font-extrabold text-slate-700 uppercase">
+                      Template Pesan Sambutan ke Pelanggan Baru
+                    </label>
+                    <textarea
+                      rows={7}
+                      value={waConfig.customerTemplate}
+                      onChange={(e) => setWaConfig((prev) => ({ ...prev, customerTemplate: e.target.value }))}
+                      className="w-full px-3.5 py-2.5 border border-slate-200 rounded-2xl text-xs font-mono bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-emerald-600"
+                    />
+                    <p className="text-[10px] text-slate-400">
+                      Pesan ini otomatis dikirim ke nomor WhatsApp pelanggan yang baru mendaftar.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-100">
+                  <button
+                    type="submit"
+                    disabled={waSaving}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-2xl text-xs shadow-lg shadow-emerald-600/20 transition flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{waSaving ? 'Menyimpan...' : 'Simpan Pengaturan API WhatsApp'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* STEP-BY-STEP INSTALLATION GUIDE */}
+            <div className="bg-slate-900 text-white rounded-3xl p-6 sm:p-8 space-y-6 shadow-xl">
+              <div className="flex items-center gap-3 pb-4 border-b border-slate-800">
+                <div className="p-3 bg-emerald-500/20 text-emerald-400 rounded-2xl">
+                  <BookOpen className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base sm:text-lg font-black">
+                    Petunjuk Pemasangan API WhatsApp Otomatis (Step-by-Step)
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Ikuti 4 langkah mudah berikut untuk menghubungkan nomor WhatsApp Admin Anda ke website ini:
+                  </p>
+                </div>
               </div>
-            )}
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="p-4 bg-slate-800/70 rounded-2xl border border-slate-700/70 space-y-2">
+                  <span className="inline-block px-2.5 py-0.5 bg-emerald-500/20 text-emerald-300 rounded-md font-extrabold text-[10px]">
+                    LANGKAH 1 — DAFTAR GATEWAY (CONTOH: FONNTE)
+                  </span>
+                  <p className="font-bold text-white">Buat Akun & Hubungkan Nomor WhatsApp</p>
+                  <p className="text-slate-300 leading-relaxed text-[11px]">
+                    1. Buka website <strong>https://fonnte.com</strong> (atau Wablas / UltraMsg) lalu daftar akun.<br />
+                    2. Masuk ke menu <strong>Devices (Perangkat)</strong> &rarr; klik <strong>Add Device</strong>.<br />
+                    3. Masukkan nomor WhatsApp Admin/CS Anda lalu klik <strong>Connect</strong> dan scan QR Code menggunakan aplikasi WhatsApp di HP Anda (seperti login WhatsApp Web).
+                  </p>
+                </div>
+
+                <div className="p-4 bg-slate-800/70 rounded-2xl border border-slate-700/70 space-y-2">
+                  <span className="inline-block px-2.5 py-0.5 bg-blue-500/20 text-blue-300 rounded-md font-extrabold text-[10px]">
+                    LANGKAH 2 — SALIN TOKEN API
+                  </span>
+                  <p className="font-bold text-white">Ambil Token API Perangkat</p>
+                  <p className="text-slate-300 leading-relaxed text-[11px]">
+                    1. Setelah status perangkat di Fonnte berstatus <strong>Connected (Terhubung)</strong>, klik tombol <strong>Token</strong> pada perangkat tersebut.<br />
+                    2. Salin (Copy) kode <strong>API Token</strong> Anda.<br />
+                    3. Tempelkan (Paste) kode tersebut pada kolom <strong>"API Key / Token WhatsApp Gateway"</strong> di atas.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-slate-800/70 rounded-2xl border border-slate-700/70 space-y-2">
+                  <span className="inline-block px-2.5 py-0.5 bg-amber-500/20 text-amber-300 rounded-md font-extrabold text-[10px]">
+                    LANGKAH 3 — AKTIFKAN & TES KIRIM
+                  </span>
+                  <p className="font-bold text-white">Simpan & Uji Coba Pengiriman</p>
+                  <p className="text-slate-300 leading-relaxed text-[11px]">
+                    1. Isi <strong>Nomor WhatsApp Admin Penerima</strong> (contoh: <code className="text-emerald-300">081234567890</code>).<br />
+                    2. Centang <strong>"Aktifkan Pengiriman Otomatis via API Gateway"</strong>.<br />
+                    3. Klik <strong>Simpan Pengaturan API WhatsApp</strong> (otomatis tersimpan ke Google Sheets sehingga aktif di semua perangkat & Vercel).<br />
+                    4. Klik tombol <strong>"Tes Kirim WA"</strong> untuk memastikan pesan masuk ke HP Anda.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-slate-800/70 rounded-2xl border border-slate-700/70 space-y-2">
+                  <span className="inline-block px-2.5 py-0.5 bg-purple-500/20 text-purple-300 rounded-md font-extrabold text-[10px]">
+                    LANGKAH 4 — MODE TANPA TOKEN (GRATIS 100%)
+                  </span>
+                  <p className="font-bold text-white">Tetap Jalan Meski Tanpa Token Berbayar</p>
+                  <p className="text-slate-300 leading-relaxed text-[11px]">
+                    Jika Anda belum memiliki Token API Gateway, website ini sudah dilengkapi fitur <strong>Direct WhatsApp Click-to-Chat</strong>. Saat pelanggan selesai mendaftar, tersedia tombol <strong>"Kirim Konfirmasi ke WhatsApp Admin"</strong> yang otomatis mengisi pesan lengkap beserta link titik koordinat Google Maps!
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -3420,6 +4583,8 @@ function doPost(e) {
           </div>
         )}
 
+        </div>
+
         <ImagePreviewModal
           isOpen={previewModal.isOpen}
           onClose={() => setPreviewModal(prev => ({ ...prev, isOpen: false }))}
@@ -3428,7 +4593,244 @@ function doPost(e) {
           subtitle={previewModal.subtitle}
         />
       </div>
+
+      {/* ========================================================================= */}
+      {/* MOBILE ADMIN MORE MENU SHEET (DRAWER FOR EXTRA TABS ON PHONE)             */}
+      {/* ========================================================================= */}
+      {mobileAdminDrawerOpen && (
+        <div
+          className="lg:hidden fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-end justify-center animate-in fade-in duration-150"
+          onClick={() => setMobileAdminDrawerOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg bg-white rounded-t-3xl p-5 pb-24 space-y-4 shadow-2xl border-t border-slate-200 animate-in slide-in-from-bottom duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h4 className="font-extrabold text-sm text-slate-900">Menu Pengaturan Admin</h4>
+                <p className="text-[11px] text-slate-500">Pilih menu manajemen sistem WiFi & database</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileAdminDrawerOpen(false)}
+                className="p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('packages');
+                  setMobileAdminDrawerOpen(false);
+                }}
+                className={`p-3.5 rounded-2xl border text-left flex items-center gap-3 transition ${
+                  activeTab === 'packages'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-md'
+                    : 'bg-slate-50 text-slate-800 border-slate-200/80 hover:bg-blue-50'
+                }`}
+              >
+                <Wifi className="w-5 h-5 shrink-0" />
+                <div>
+                  <p className="font-extrabold text-xs">Paket WiFi</p>
+                  <p className={`text-[10px] ${activeTab === 'packages' ? 'text-blue-100' : 'text-slate-400'}`}>Tambah / Edit</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('coverage');
+                  setMobileAdminDrawerOpen(false);
+                }}
+                className={`p-3.5 rounded-2xl border text-left flex items-center gap-3 transition ${
+                  activeTab === 'coverage'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-md'
+                    : 'bg-slate-50 text-slate-800 border-slate-200/80 hover:bg-blue-50'
+                }`}
+              >
+                <MapPin className="w-5 h-5 shrink-0" />
+                <div>
+                  <p className="font-extrabold text-xs">Area Cakupan</p>
+                  <p className={`text-[10px] ${activeTab === 'coverage' ? 'text-blue-100' : 'text-slate-400'}`}>Wilayah & Peta</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('company_settings');
+                  setMobileAdminDrawerOpen(false);
+                }}
+                className={`p-3.5 rounded-2xl border text-left flex items-center gap-3 transition ${
+                  activeTab === 'company_settings'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-md'
+                    : 'bg-slate-50 text-slate-800 border-slate-200/80 hover:bg-blue-50'
+                }`}
+              >
+                <Settings className="w-5 h-5 shrink-0" />
+                <div>
+                  <p className="font-extrabold text-xs">Pengaturan Web</p>
+                  <p className={`text-[10px] ${activeTab === 'company_settings' ? 'text-blue-100' : 'text-slate-400'}`}>Logo & Slide</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('qris');
+                  setMobileAdminDrawerOpen(false);
+                }}
+                className={`p-3.5 rounded-2xl border text-left flex items-center gap-3 transition ${
+                  activeTab === 'qris'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-md'
+                    : 'bg-slate-50 text-slate-800 border-slate-200/80 hover:bg-blue-50'
+                }`}
+              >
+                <QrCode className="w-5 h-5 shrink-0 text-amber-500" />
+                <div>
+                  <p className="font-extrabold text-xs">Kode QRIS</p>
+                  <p className={`text-[10px] ${activeTab === 'qris' ? 'text-blue-100' : 'text-slate-400'}`}>Bayar Instan</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('whatsapp_api');
+                  setMobileAdminDrawerOpen(false);
+                }}
+                className={`p-3.5 rounded-2xl border text-left flex items-center gap-3 transition ${
+                  activeTab === 'whatsapp_api'
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-md'
+                    : 'bg-slate-50 text-slate-800 border-slate-200/80 hover:bg-emerald-50'
+                }`}
+              >
+                <MessageSquare className="w-5 h-5 shrink-0 text-emerald-500" />
+                <div>
+                  <p className="font-extrabold text-xs">API WhatsApp</p>
+                  <p className={`text-[10px] ${activeTab === 'whatsapp_api' ? 'text-emerald-100' : 'text-slate-400'}`}>Notif Otomatis</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('sheets');
+                  setMobileAdminDrawerOpen(false);
+                }}
+                className={`p-3.5 rounded-2xl border text-left flex items-center gap-3 transition ${
+                  activeTab === 'sheets'
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-md'
+                    : 'bg-slate-50 text-slate-800 border-slate-200/80 hover:bg-emerald-50'
+                }`}
+              >
+                <FileSpreadsheet className="w-5 h-5 shrink-0 text-emerald-500" />
+                <div>
+                  <p className="font-extrabold text-xs">Google Sheets</p>
+                  <p className={`text-[10px] ${activeTab === 'sheets' ? 'text-emerald-100' : 'text-slate-400'}`}>Sinkron Database</p>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* NATIVE APP-STYLE MOBILE BOTTOM NAVIGATION BAR FOR ADMIN                   */}
+      {/* ========================================================================= */}
+      <nav
+        aria-label="Navigasi Bawah Admin"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-lg border-t border-slate-200/90 shadow-[0_-8px_25px_-5px_rgba(15,23,42,0.12)] px-2 py-1.5 flex items-center justify-around"
+      >
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('overview');
+            setMobileAdminDrawerOpen(false);
+          }}
+          className={`flex flex-col items-center justify-center gap-0.5 py-1 px-2.5 rounded-2xl transition-all active:scale-95 ${
+            activeTab === 'overview' && !mobileAdminDrawerOpen
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <TrendingUp className="w-5 h-5" />
+          <span className="text-[10px]">Analisis</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('customers');
+            setMobileAdminDrawerOpen(false);
+          }}
+          className={`flex flex-col items-center justify-center gap-0.5 py-1 px-2.5 rounded-2xl transition-all active:scale-95 ${
+            activeTab === 'customers' && !mobileAdminDrawerOpen
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <Users className="w-5 h-5" />
+          <span className="text-[10px]">Pelanggan</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('payments');
+            setMobileAdminDrawerOpen(false);
+          }}
+          className={`relative flex flex-col items-center justify-center gap-0.5 py-1 px-2.5 rounded-2xl transition-all active:scale-95 ${
+            activeTab === 'payments' && !mobileAdminDrawerOpen
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <CreditCard className="w-5 h-5" />
+          <span className="text-[10px]">Verifikasi</span>
+          {pendingPaymentsList.length > 0 && (
+            <span className="absolute top-1 right-2 w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse ring-2 ring-white" />
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('tickets');
+            setMobileAdminDrawerOpen(false);
+          }}
+          className={`relative flex flex-col items-center justify-center gap-0.5 py-1 px-2.5 rounded-2xl transition-all active:scale-95 ${
+            activeTab === 'tickets' && !mobileAdminDrawerOpen
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <AlertTriangle className="w-5 h-5" />
+          <span className="text-[10px]">Tiket</span>
+          {supportTickets.filter((t) => t.status === 'open').length > 0 && (
+            <span className="absolute top-1 right-2 w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse ring-2 ring-white" />
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setMobileAdminDrawerOpen((prev) => !prev)}
+          className={`flex flex-col items-center justify-center gap-0.5 py-1 px-2.5 rounded-2xl transition-all active:scale-95 ${
+            mobileAdminDrawerOpen ||
+            ['packages', 'coverage', 'company_settings', 'qris', 'whatsapp_api', 'sheets'].includes(activeTab)
+              ? 'text-blue-600 font-extrabold bg-blue-50/80'
+              : 'text-slate-500 hover:text-slate-800 font-semibold'
+          }`}
+        >
+          <Settings className="w-5 h-5" />
+          <span className="text-[10px]">Menu Lain</span>
+        </button>
+      </nav>
+      </div>
     </div>
-  </div>
   );
 }

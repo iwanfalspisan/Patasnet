@@ -42,7 +42,7 @@ export default function LoginView({
   tagline,
 }: LoginViewProps) {
   const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot-password' | 'reset-password'>('login');
-  const [role, setRole] = useState<'customer' | 'admin' | 'developer'>('customer');
+  const [role, setRole] = useState<'customer' | 'admin'>('customer');
 
   // Login form state
   const [email, setEmail] = useState('');
@@ -208,7 +208,7 @@ export default function LoginView({
     }
   };
 
-  const autofillCredential = (targetRole: 'customer' | 'admin' | 'developer') => {
+  const autofillCredential = (targetRole: 'customer' | 'admin') => {
     setRole(targetRole);
     setAuthMode('login');
     setErrorMessage('');
@@ -218,9 +218,6 @@ export default function LoginView({
     } else if (targetRole === 'admin') {
       setEmail('admin@patasnet.id');
       setPassword('admin');
-    } else {
-      setEmail('ajayrostaman@gmail.com');
-      setPassword('pengelola123');
     }
   };
 
@@ -238,7 +235,7 @@ export default function LoginView({
             </div>
             <h2 className="text-xl font-black text-white tracking-tight">
               {authMode === 'login'
-                ? 'Portal Masuk Layanan'
+                ? 'Masuk'
                 : authMode === 'forgot-password'
                 ? 'Pemulihan Kata Sandi'
                 : authMode === 'reset-password'
@@ -272,7 +269,7 @@ export default function LoginView({
               }`}
             >
               <LogIn className="w-3.5 h-3.5" />
-              <span>Masuk Portal</span>
+              <span>Masuk</span>
             </button>
             <button
               type="button"
@@ -396,20 +393,6 @@ export default function LoginView({
                 >
                   Admin WiFi
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRole('developer');
-                    setErrorMessage('');
-                  }}
-                  className={`flex-1 py-1.5 rounded-xl font-bold transition ${
-                    role === 'developer'
-                      ? 'bg-amber-600/30 text-amber-300 border border-amber-500/40'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Developer
-                </button>
               </div>
 
               {/* Email Field */}
@@ -428,8 +411,6 @@ export default function LoginView({
                     placeholder={
                       role === 'admin'
                         ? 'admin@patasnet.id'
-                        : role === 'developer'
-                        ? 'ajayrostaman@gmail.com'
                         : 'budi@gmail.com'
                     }
                     className="w-full pl-10 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl focus:ring-1 focus:ring-blue-500 focus:outline-none text-white font-mono text-xs"
@@ -492,7 +473,7 @@ export default function LoginView({
                   </>
                 ) : (
                   <>
-                    <span>Masuk ke Portal</span>
+                    <span>Masuk</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
@@ -906,7 +887,7 @@ export default function LoginView({
               <span className="text-blue-400 font-normal lowercase">klik untuk isi otomatis</span>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => autofillCredential('customer')}
@@ -923,15 +904,6 @@ export default function LoginView({
               >
                 <span className="block text-[9px] font-bold text-indigo-400 uppercase">Admin WiFi</span>
                 <span className="block text-[10px] font-mono text-slate-300 truncate">admin@...</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => autofillCredential('developer')}
-                className="p-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-amber-500/50 rounded-xl text-left transition group"
-              >
-                <span className="block text-[9px] font-bold text-amber-400 uppercase">Developer</span>
-                <span className="block text-[10px] font-mono text-slate-300 truncate">ajayrost...</span>
               </button>
             </div>
           </div>

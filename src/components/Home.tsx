@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Wifi, Shield, Zap, Check, ArrowRight, HelpCircle, MapPin, Sparkles, AlertCircle, Gift, Tag } from 'lucide-react';
+import { Wifi, Shield, Zap, Check, ArrowRight, HelpCircle, MapPin, Sparkles, AlertCircle, Gift, Tag, ChevronLeft, ChevronRight } from 'lucide-react';
 import { WifiPackage, CompanySettings } from '../types';
+import { DEFAULT_HERO_SLIDES } from '../lib/googleSheetsIntegration';
+import { getLocalPackages, getLocalCoverage, saveLocalPackages, saveLocalCoverage } from '../lib/clientFallback';
 import CoverageDetails from './CoverageDetails';
 import Testimonials from './Testimonials';
 import Logo from './Logo';
@@ -105,8 +107,22 @@ export const PACKAGES: WifiPackage[] = [
 export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl, companySettings }: HomeProps) {
   const [activeTab, setActiveTab] = useState<'home' | 'business'>('home');
   const [faqOpen, setFaqOpen] = useState<number | null>(0);
-  const [packagesList, setPackagesList] = useState<WifiPackage[]>(PACKAGES);
+  const [packagesList, setPackagesList] = useState<WifiPackage[]>(() => getLocalPackages());
   const [promosList, setPromosList] = useState<string[]>(companySettings?.promos || []);
+  const [currentHeroSlide, setCurrentHeroSlide] = useState(0);
+
+  const heroSlides =
+    Array.isArray(companySettings?.heroSlides) && companySettings!.heroSlides!.length > 0
+      ? companySettings!.heroSlides!
+      : DEFAULT_HERO_SLIDES;
+
+  useEffect(() => {
+    if (heroSlides.length <= 1) return;
+    const timer = setInterval(() => {
+      setCurrentHeroSlide((prev) => (prev + 1) % heroSlides.length);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [heroSlides.length]);
 
   const currentCompanyName = companyName || companySettings?.name || 'Patas Net WiFi';
   const currentLegalName = companySettings?.legalName || 'PT. AMANUSA TELEMEDIA';
@@ -128,35 +144,59 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
     };
   };
   const coverageStats = parseCoverageStats(companySettings?.coverageText);
-  const [coverageData, setCoverageData] = useState<any[]>([]);
+  const [coverageData, setCoverageData] = useState<any[]>(() => getLocalCoverage());
 
   useEffect(() => {
+    const syncData = () => {
+      setPackagesList(getLocalPackages());
+      setCoverageData(getLocalCoverage());
+    };
+
+    syncData();
+
     fetch('/api/packages')
-      .then(res => res.json())
+      .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (data.packages && data.packages.length > 0) {
-          setPackagesList(data.packages);
+        if (data && Array.isArray(data.packages) && data.packages.length > 0) {
+          saveLocalPackages(data.packages, false);
+          setPackagesList(getLocalPackages());
         }
       })
       .catch(() => {});
 
     fetch('/api/settings/company')
-      .then(res => res.json())
+      .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (data.promos && data.promos.length > 0) {
+        if (data && data.promos && data.promos.length > 0) {
           setPromosList(data.promos);
         }
       })
       .catch(() => {});
 
     fetch('/api/coverage')
-      .then(res => res.json())
+      .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (Array.isArray(data) && data.length > 0) {
-          setCoverageData(data);
+          saveLocalCoverage(data, false);
+          setCoverageData(getLocalCoverage());
         }
       })
       .catch(() => {});
+
+    window.addEventListener('patasnet:data-updated', syncData);
+    window.addEventListener('storage', syncData);
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('patasnet_sync');
+      bc.onmessage = () => syncData();
+    } catch {}
+
+    return () => {
+      window.removeEventListener('patasnet:data-updated', syncData);
+      window.removeEventListener('storage', syncData);
+      if (bc) bc.close();
+    };
   }, []);
 
   // Compute live coverage numbers from database or fallback to settings
@@ -241,21 +281,45 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
 
   return (
     <div className="bg-slate-50 min-h-screen text-slate-800">
-      {/* Hero Section */}
-      <section className="relative overflow-hidden bg-gradient-to-br from-blue-900 via-indigo-950 to-slate-900 text-white py-20 sm:py-28 px-4">
-        {/* Abstract background blobs */}
-        <div className="absolute top-1/4 right-0 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-1/4 left-10 w-80 h-80 bg-indigo-500/10 rounded-full blur-3xl" />
+      {/* Hero Section with Transparent Photo Slideshow Background */}
+      <section className="relative overflow-hidden bg-slate-950 text-white py-20 sm:py-28 px-4">
+        {/* Transparent Background Photo Slideshow Layer */}
+        <div className="absolute inset-0 z-0 overflow-hidden">
+          {heroSlides.map((slideUrl, idx) => {
+            const isActive = idx === currentHeroSlide % heroSlides.length;
+            return (
+              <div
+                key={`${slideUrl}-${idx}`}
+                className={`absolute inset-0 transition-all duration-1000 ease-in-out ${
+                  isActive ? 'opacity-40 scale-105' : 'opacity-0 scale-100 pointer-events-none'
+                }`}
+              >
+                <img
+                  src={slideUrl}
+                  alt={`Background Slide ${idx + 1}`}
+                  className="w-full h-full object-cover object-center"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+            );
+          })}
+          {/* Semi-transparent Gradient Overlay so text & cards pop clearly */}
+          <div className="absolute inset-0 bg-gradient-to-br from-blue-950/80 via-indigo-950/75 to-slate-950/85 backdrop-blur-[1px]" />
+        </div>
 
-        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 items-center relative z-10">
-          <div className="lg:col-span-7 space-y-6 text-center lg:text-left">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-500/20 text-blue-300 rounded-full text-xs font-bold tracking-wide uppercase border border-blue-500/30">
+        {/* Abstract background blobs */}
+        <div className="absolute top-1/4 right-0 w-96 h-96 bg-blue-500/15 rounded-full blur-3xl z-0 pointer-events-none" />
+        <div className="absolute bottom-1/4 left-10 w-80 h-80 bg-indigo-500/15 rounded-full blur-3xl z-0 pointer-events-none" />
+
+        <div className="max-w-7xl mx-auto relative z-10">
+          <div className="max-w-3xl space-y-6 text-center lg:text-left">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-500/20 text-blue-300 rounded-full text-xs font-bold tracking-wide uppercase border border-blue-500/30 backdrop-blur-sm">
               <Sparkles className="w-3.5 h-3.5" /> INTERNET CEPAT BERKUALITAS 100% FIBER OPTIK
             </span>
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-tight">
+            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-tight drop-shadow-sm">
               Internet <span className="text-blue-400">Stabil dan Cepat</span>, Koneksi Wifi Rumah <span className="text-yellow-400">Unlimited</span>
             </h1>
-            <p className="text-sm sm:text-base text-slate-300 leading-relaxed max-w-2xl mx-auto lg:mx-0">
+            <p className="text-sm sm:text-base text-slate-200 leading-relaxed max-w-2xl mx-auto lg:mx-0 drop-shadow-sm">
               {currentTagline} Nikmati koneksi internet rumah dan bisnis tanpa batas kuota dengan 100% fiber optik simetris, ping stabil, dan instalasi terpercaya.
             </p>
             <div className="flex flex-wrap justify-center lg:justify-start gap-3.5 pt-2">
@@ -263,7 +327,7 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
                 onClick={() => {
                   document.getElementById('paket-section')?.scrollIntoView({ behavior: 'smooth' });
                 }}
-                className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-blue-500/20 active:scale-95 text-sm"
+                className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-blue-500/25 active:scale-95 text-sm"
               >
                 Lihat Paket
               </button>
@@ -271,50 +335,49 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
                 onClick={() => {
                   document.getElementById('promo-section')?.scrollIntoView({ behavior: 'smooth' });
                 }}
-                className="px-6 py-3 bg-slate-800/80 hover:bg-slate-800 text-white border border-slate-700 rounded-xl font-semibold transition-all active:scale-95 text-sm"
+                className="px-6 py-3 bg-slate-900/75 hover:bg-slate-800/90 backdrop-blur-md text-white border border-white/15 rounded-xl font-semibold transition-all active:scale-95 text-sm"
               >
                 Cek Promo Terbaru
               </button>
             </div>
-          </div>
 
-          <div className="lg:col-span-5 flex justify-center">
-            {/* Visual placeholder card representing Image 1 (Taranet Girl holding laptop) */}
-            <div className="relative w-full max-w-sm aspect-square glass-panel-dark rounded-3xl p-6 shadow-2xl flex flex-col justify-between overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-t from-blue-950/40 via-transparent to-transparent pointer-events-none" />
-              <div className="flex justify-between items-start">
-                <div className="flex items-center gap-1 px-3 py-1 bg-yellow-400 text-slate-900 font-extrabold text-[10px] rounded-lg tracking-wider uppercase">
-                  PROMO MEI-JULI
+            {/* Slide Indicator Controls */}
+            {heroSlides.length > 1 && (
+              <div className="pt-4 flex items-center justify-center lg:justify-start gap-3">
+                <button
+                  type="button"
+                  onClick={() => setCurrentHeroSlide((prev) => (prev - 1 + heroSlides.length) % heroSlides.length)}
+                  className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/15 transition active:scale-90"
+                  aria-label="Slide Sebelumnya"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <div className="flex items-center gap-1.5">
+                  {heroSlides.map((_, idx) => {
+                    const active = idx === currentHeroSlide % heroSlides.length;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setCurrentHeroSlide(idx)}
+                        className={`h-1.5 rounded-full transition-all duration-300 ${
+                          active ? 'w-7 bg-blue-400 shadow-sm shadow-blue-400/50' : 'w-2 bg-white/30 hover:bg-white/60'
+                        }`}
+                        aria-label={`Pilih Slide ${idx + 1}`}
+                      />
+                    );
+                  })}
                 </div>
-                <div className="text-right text-xs font-semibold text-slate-300">
-                  {currentLegalName}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setCurrentHeroSlide((prev) => (prev + 1) % heroSlides.length)}
+                  className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/15 transition active:scale-90"
+                  aria-label="Slide Berikutnya"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
               </div>
-
-              {/* Graphic element representing high-speed data flow */}
-              <div className="my-auto space-y-5 text-center">
-                <div className="mx-auto flex justify-center">
-                  <Logo iconOnly={true} className="scale-125" companyName={currentCompanyName} logoUrl={logoUrl || companySettings?.logoUrl} />
-                </div>
-                <div>
-                  <h3 className="font-display font-black text-2xl text-white">UP TO 300 Mbps</h3>
-                  <p className="text-xs text-slate-300">100% Simetris Upload & Download</p>
-                </div>
-                {/* Visual speed wave */}
-                <div className="flex justify-center gap-1.5 h-6 items-end">
-                  <div className="w-1.5 h-2 bg-blue-500 rounded-full" />
-                  <div className="w-1.5 h-3 bg-blue-400 rounded-full animate-pulse" />
-                  <div className="w-1.5 h-4 bg-blue-300 rounded-full" />
-                  <div className="w-1.5 h-5 bg-blue-200 rounded-full animate-bounce" />
-                  <div className="w-1.5 h-6 bg-yellow-400 rounded-full" />
-                </div>
-              </div>
-
-              <div className="bg-slate-950/80 backdrop-blur border border-white/10 p-3.5 rounded-xl text-center">
-                <p className="text-[10px] text-slate-400 uppercase tracking-widest font-bold">Biaya Pemasangan Baru</p>
-                <p className="font-extrabold text-lg text-emerald-400">RP 0 (GRATIS 100%)</p>
-              </div>
-            </div>
+            )}
           </div>
         </div>
       </section>
@@ -450,7 +513,7 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
         </div>
 
         {/* Packages Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        <div key={activeTab} className="tab-transition grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
           {filteredPackages.map((pkg) => (
             <div
               key={pkg.id}

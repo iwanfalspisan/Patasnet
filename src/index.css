@@ -1,6 +1,5 @@
-@import "tailwindcss";
-
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
 
 @theme {
   --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -59,6 +58,10 @@
 }
 
 /* Base styles refinement */
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   font-family: var(--font-sans);
   background-color: #f8fafc;
@@ -67,6 +70,15 @@ body {
 h1, h2, h3, .font-display {
   font-family: var(--font-display);
   letter-spacing: -0.02em;
+}
+
+/* Global smooth interactive transitions for buttons & links */
+button, a {
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 /* Custom scrollbar for premium touch */
@@ -84,18 +96,92 @@ h1, h2, h3, .font-display {
   background: #94a3b8;
 }
 
-/* Smooth page transition */
+/* Smooth page & menu tab transitions (ends with transform: none so Leaflet maps inside containers are never clipped) */
 @keyframes pageEnter {
-  from {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.995);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tabEnter {
+  0% {
     opacity: 0;
     transform: translateY(8px);
   }
-  to {
+  100% {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
+  }
+}
+
+@keyframes toastPop {
+  0% {
+    opacity: 0;
+    transform: translateY(-16px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toastProgress {
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0%;
   }
 }
 
 .page-transition {
-  animation: pageEnter 0.32s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: pageEnter 0.32s cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+.tab-transition {
+  animation: tabEnter 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.toast-animate {
+  animation: toastPop 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.toast-progress-bar {
+  animation: toastProgress 4s linear forwards;
+}
+
+/* Explicit Leaflet Map overrides to prevent Tailwind v4 img preflight from collapsing tiles or markers */
+.leaflet-container {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 300px;
+  z-index: 10;
+  font-family: var(--font-sans) !important;
+  background-color: #e2e8f0 !important;
+}
+
+.leaflet-container img,
+.leaflet-container .leaflet-tile,
+.leaflet-container .leaflet-marker-icon,
+.leaflet-container .leaflet-marker-shadow {
+  max-width: none !important;
+  max-height: none !important;
+  width: auto;
+  height: auto;
+}
+
+.leaflet-container .leaflet-tile {
+  width: 256px !important;
+  height: 256px !important;
+}
+
+.leaflet-div-icon {
+  background: transparent !important;
+  border: none !important;
+}
+
