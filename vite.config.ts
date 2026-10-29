@@ -50,8 +50,7 @@ export default defineConfig(() => {
           navigateFallbackDenylist: [/^\/api\//],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
     ],
@@ -67,10 +66,7 @@ export default defineConfig(() => {
       include: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'],
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
+      hmr: false,
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
   };
