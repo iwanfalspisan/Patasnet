@@ -145,7 +145,7 @@ function loadCoverageFromDisk(): typeof DEFAULT_COVERAGE {
   try {
     if (fs.existsSync(COVERAGE_PATH)) {
       const parsed = JSON.parse(fs.readFileSync(COVERAGE_PATH, 'utf-8'));
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed)) return parsed;
     }
   } catch {}
   return [...DEFAULT_COVERAGE];

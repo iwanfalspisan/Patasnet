@@ -347,13 +347,12 @@ export default function AdminDashboard({
     setCoverageList(updatedCov);
     const summaryText = computeCoverageSummaryText(updatedCov);
     setCompanyCoverageTextInput(summaryText);
-    if (onUpdateCompanySettings) {
-      onUpdateCompanySettings({
-        name: companyNameInput || companySettings?.name || 'Patas.Net',
-        coverageText: summaryText,
-        coverageJson: JSON.stringify(updatedCov),
-      }).catch(() => {});
-    }
+    // Keep local server disk mirror in sync without firing duplicate Google Sheets requests
+    fetch('/api/coverage/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coverage: updatedCov, localOnly: true }),
+    }).catch(() => {});
   };
 
   const fetchCoverageList = async () => {
@@ -362,19 +361,6 @@ export default function AdminDashboard({
       const localCov = getLocalCoverage();
       setCoverageList(localCov);
       setCompanyCoverageTextInput(computeCoverageSummaryText(localCov));
-
-      const response = await fetch('/api/coverage');
-      if (response.ok) {
-        const data = await response.json();
-        if (Array.isArray(data) && data.length > 0 && localCov.length === 0) {
-          const saved = saveLocalCoverage(data, false);
-          setCoverageList(saved);
-          setCompanyCoverageTextInput(computeCoverageSummaryText(saved));
-        }
-      }
-    } catch {
-      const localCov = getLocalCoverage();
-      setCoverageList(localCov);
     } finally {
       setLoadingCoverage(false);
     }
@@ -385,17 +371,6 @@ export default function AdminDashboard({
     try {
       const localPkgs = getLocalPackages();
       setPackagesList(localPkgs);
-
-      const res = await fetch('/api/packages');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.packages) && data.packages.length > 0 && localPkgs.length === 0) {
-          const saved = saveLocalPackages(data.packages, false);
-          setPackagesList(saved);
-        }
-      }
-    } catch {
-      setPackagesList(getLocalPackages());
     } finally {
       setLoadingPackages(false);
     }
@@ -412,6 +387,21 @@ export default function AdminDashboard({
   useEffect(() => {
     fetchPackagesList();
     fetchCoverageList();
+
+    const handleDataUpdated = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (!detail || detail.type === 'coverage' || detail.type === 'settings') {
+        const latestCov = getLocalCoverage();
+        setCoverageList(latestCov);
+        setCompanyCoverageTextInput(computeCoverageSummaryText(latestCov));
+      }
+      if (!detail || detail.type === 'packages' || detail.type === 'settings') {
+        setPackagesList(getLocalPackages());
+      }
+    };
+
+    window.addEventListener('patasnet:data-updated', handleDataUpdated);
+    return () => window.removeEventListener('patasnet:data-updated', handleDataUpdated);
   }, []);
 
   // ---------------- Coverage Handlers (Local + Server + Google Sheets Sync) ----------------
@@ -420,17 +410,17 @@ export default function AdminDashboard({
     const trimmed = newCityName.trim();
     if (!trimmed) return;
 
+    const current = getLocalCoverage();
+    if (current.some((c) => c.cityName.trim().toLowerCase() === trimmed.toLowerCase())) {
+      showToast(`Wilayah "${trimmed}" sudah terdaftar di daftar cakupan.`, 'error');
+      return;
+    }
+
     const updated = addLocalCoverageCity(trimmed, newCityType);
     syncCoverageSummaryWithCompany(updated);
     setNewCityName('');
 
-    fetch('/api/coverage/city', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cityName: trimmed, regionType: newCityType }),
-    }).catch(() => {});
-
-    showToast(`Wilayah ${newCityType} ${trimmed} berhasil ditambahkan & disinkronkan!`);
+    showToast(`Wilayah ${newCityType} ${trimmed} berhasil ditambahkan & disinkronkan ke Google Sheets!`);
   };
 
   const handleSaveEditCity = async () => {
@@ -441,11 +431,6 @@ export default function AdminDashboard({
       editingCity.regionType
     );
     syncCoverageSummaryWithCompany(updated);
-    fetch('/api/coverage/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coverage: updated }),
-    }).catch(() => {});
     setEditingCity(null);
     showToast(`Wilayah berhasil diperbarui menjadi ${editingCity.regionType} ${editingCity.newName.trim()}!`);
   };
@@ -455,13 +440,7 @@ export default function AdminDashboard({
     syncCoverageSummaryWithCompany(updated);
     setCityToDelete(null);
 
-    fetch('/api/coverage/city/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cityName }),
-    }).catch(() => {});
-
-    showToast(`Wilayah ${cityName} berhasil dihapus.`);
+    showToast(`Wilayah ${cityName} berhasil dihapus dari website & Google Sheets.`);
   };
 
   const handleAddKecamatan = async (cityName: string) => {
@@ -472,12 +451,6 @@ export default function AdminDashboard({
     const updated = addLocalKecamatan(cityName, trimmed);
     syncCoverageSummaryWithCompany(updated);
     setNewKecName((prev) => ({ ...prev, [cityName]: '' }));
-
-    fetch('/api/coverage/kecamatan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cityName, name: trimmed }),
-    }).catch(() => {});
 
     showToast(`Kecamatan ${trimmed} berhasil ditambahkan ke ${cityName}!`);
   };
@@ -490,11 +463,6 @@ export default function AdminDashboard({
       editingKec.newName.trim()
     );
     syncCoverageSummaryWithCompany(updated);
-    fetch('/api/coverage/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coverage: updated }),
-    }).catch(() => {});
     setEditingKec(null);
     showToast(`Nama kecamatan berhasil diubah menjadi ${editingKec.newName.trim()}!`);
   };
@@ -503,12 +471,6 @@ export default function AdminDashboard({
     const updated = deleteLocalKecamatan(cityName, name);
     syncCoverageSummaryWithCompany(updated);
     setKecToDelete(null);
-
-    fetch('/api/coverage/kecamatan/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cityName, name }),
-    }).catch(() => {});
 
     showToast(`Kecamatan ${name} berhasil dihapus.`);
   };
@@ -525,12 +487,6 @@ export default function AdminDashboard({
     setNewKelName((prev) => ({ ...prev, [key]: '' }));
     setNewKelNodes((prev) => ({ ...prev, [key]: '' }));
 
-    fetch('/api/coverage/kelurahan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cityName, kecamatanName, name: trimmed, nodesCount }),
-    }).catch(() => {});
-
     showToast(`Kelurahan ${trimmed} (${nodesCount} Node ODP) berhasil ditambahkan!`);
   };
 
@@ -544,11 +500,6 @@ export default function AdminDashboard({
       Number(editingKel.nodesCount) || 15
     );
     syncCoverageSummaryWithCompany(updated);
-    fetch('/api/coverage/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ coverage: updated }),
-    }).catch(() => {});
     setEditingKel(null);
     showToast(`Kelurahan ${editingKel.newName.trim()} berhasil diperbarui!`);
   };
@@ -557,12 +508,6 @@ export default function AdminDashboard({
     const updated = deleteLocalKelurahan(cityName, kecamatanName, name);
     syncCoverageSummaryWithCompany(updated);
     setKelToDelete(null);
-
-    fetch('/api/coverage/kelurahan/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cityName, kecamatanName, name }),
-    }).catch(() => {});
 
     showToast(`Kelurahan ${name} berhasil dihapus.`);
   };
@@ -605,17 +550,10 @@ export default function AdminDashboard({
     const updatedList = addOrUpdateLocalPackage(pkgObj);
     setPackagesList(updatedList);
 
-    if (onUpdateCompanySettings) {
-      onUpdateCompanySettings({
-        name: companyNameInput || companySettings?.name || 'Patas.Net',
-        packagesJson: JSON.stringify(updatedList),
-      }).catch(() => {});
-    }
-
     fetch('/api/packages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pkgObj),
+      body: JSON.stringify({ ...pkgObj, localOnly: true }),
     }).catch(() => {});
 
     const wasEditing = Boolean(editingPkgId);
@@ -659,17 +597,10 @@ export default function AdminDashboard({
     setPackagesList(updatedList);
     setPackageToDelete(null);
 
-    if (onUpdateCompanySettings) {
-      onUpdateCompanySettings({
-        name: companyNameInput || companySettings?.name || 'Patas.Net',
-        packagesJson: JSON.stringify(updatedList),
-      }).catch(() => {});
-    }
-
     fetch('/api/packages/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ id, localOnly: true }),
     }).catch(() => {});
 
     showToast('Paket WiFi berhasil dihapus dari daftar layanan.');

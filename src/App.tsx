@@ -28,6 +28,8 @@ import {
   requestPasswordResetLocally,
   resetCustomerPasswordLocally,
   getLocalPackages,
+  getLocalCoverage,
+  computeCoverageSummaryText,
 } from './lib/clientFallback';
 import { sanitizeSheetSettings, isAppsScriptWebAppUrl } from './lib/googleSheetsIntegration';
 import { generateNewCustomerWhatsAppUrl, getWhatsAppConfig } from './lib/whatsappApi';
@@ -36,9 +38,13 @@ import { MessageSquare, ExternalLink } from 'lucide-react';
 function mergeIncomingSettings(prev: CompanySettings, incoming: Partial<CompanySettings>): CompanySettings {
   const sanitized = sanitizeSheetSettings({ ...incoming });
   delete (sanitized as any)._hadFormulaError;
+  const activeCoverage = getLocalCoverage();
+  const liveCoverageText = computeCoverageSummaryText(activeCoverage);
   return {
     ...prev,
     ...sanitized,
+    coverageText: liveCoverageText,
+    coverageJson: JSON.stringify(activeCoverage),
     logoUrl: sanitized.logoUrl && String(sanitized.logoUrl).trim() !== '' ? sanitized.logoUrl : prev.logoUrl,
     qrisUrl: sanitized.qrisUrl && String(sanitized.qrisUrl).trim() !== '' ? sanitized.qrisUrl : prev.qrisUrl,
     promos:
@@ -376,7 +382,14 @@ export default function App() {
         .catch(() => {});
     }, 3000);
 
+    const handleLocalDataUpdated = () => {
+      const local = getLocalSettings();
+      setCompanySettings((prev) => mergeIncomingSettings(prev, local));
+    };
+    window.addEventListener('patasnet:data-updated', handleLocalDataUpdated);
+
     return () => {
+      window.removeEventListener('patasnet:data-updated', handleLocalDataUpdated);
       if (bc) bc.close();
       if (sse) sse.close();
       clearInterval(bgSyncInterval);

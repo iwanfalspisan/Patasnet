@@ -34,13 +34,17 @@ export interface CoverageAreaItem {
   }>;
 }
 
+let activeSheetsSyncCount = 0;
+let sheetsSyncQueue: Promise<any> = Promise.resolve();
+
 function markLocalMutation() {
   try {
     localStorage.setItem(LAST_MUTATION_TS_KEY, String(Date.now()));
   } catch {}
 }
 
-function isWithinMutationCooldown(cooldownMs = 7000): boolean {
+function isWithinMutationCooldown(cooldownMs = 15000): boolean {
+  if (activeSheetsSyncCount > 0) return true;
   try {
     const ts = Number(localStorage.getItem(LAST_MUTATION_TS_KEY) || '0');
     return Date.now() - ts < cooldownMs;
@@ -627,30 +631,40 @@ export function getLocalPackages(): WifiPackage[] {
 }
 
 export function saveLocalPackages(packages: WifiPackage[], syncToCloud = true): WifiPackage[] {
-  const normalized: WifiPackage[] = packages.map((p) => ({
-    id: String(p.id),
-    name: String(p.name).trim(),
-    speed: String(p.speed).trim(),
-    price: Number(p.price) || 0,
-    features: Array.isArray(p.features) ? p.features : [],
-    type: p.type === 'business' ? 'business' : 'home',
-    popular: Boolean(p.popular),
-  }));
+  const seenIds = new Set<string>();
+  const normalized: WifiPackage[] = [];
+  for (const p of packages) {
+    const id = String(p.id || `pkg-${Date.now()}`);
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    normalized.push({
+      id,
+      name: String(p.name).trim(),
+      speed: String(p.speed).trim(),
+      price: Number(p.price) || 0,
+      features: Array.isArray(p.features) ? p.features : [],
+      type: p.type === 'business' ? 'business' : 'home',
+      popular: Boolean(p.popular),
+    });
+  }
 
   try {
     localStorage.setItem(PACKAGES_STORAGE_KEY, JSON.stringify(normalized));
   } catch {}
 
+  const currentSettings = getLocalSettings();
+  const updatedSettings: CompanySettings = {
+    ...currentSettings,
+    packagesJson: JSON.stringify(normalized),
+  };
+  saveLocalSettings(updatedSettings);
+
   if (syncToCloud) {
     markLocalMutation();
-    const currentSettings = getLocalSettings();
-    const updatedSettings: CompanySettings = {
-      ...currentSettings,
+    syncToGoogleSheets('update_packages', {
+      packages: normalized,
       packagesJson: JSON.stringify(normalized),
-    };
-    saveLocalSettings(updatedSettings);
-    syncToGoogleSheets('update_settings', updatedSettings).catch(() => {});
-    syncToGoogleSheets('update_packages', { packages: normalized }).catch(() => {});
+    }).catch(() => {});
   }
 
   broadcastDataUpdate('packages');
@@ -681,37 +695,71 @@ export function deleteLocalPackage(id: string): WifiPackage[] {
 // ==========================================
 
 function normalizeCoverageItems(rawList: any[]): CoverageAreaItem[] {
-  return rawList.map((c: any, idx: number) => {
+  if (!Array.isArray(rawList)) return [];
+  const deduplicatedMap = new Map<string, any>();
+
+  for (const c of rawList) {
+    if (!c) continue;
+    const cityName = String(c.cityName || c.name || '').trim();
+    if (!cityName) continue;
+    const key = cityName.toLowerCase();
+
     const rawKecs = Array.isArray(c.kecamatans)
       ? c.kecamatans
       : Array.isArray(c.kecamatan)
       ? c.kecamatan
       : [];
 
-    const kecamatans = rawKecs.map((k: any) => {
+    const kecMap = new Map<string, any>();
+    for (const k of rawKecs) {
+      if (!k) continue;
+      const kecName = String(k.name || '').trim();
+      if (!kecName) continue;
       const rawKels = Array.isArray(k.kelurahans)
         ? k.kelurahans
         : Array.isArray(k.kelurahan)
         ? k.kelurahan
         : [];
-      return {
-        name: String(k.name || ''),
-        kelurahans: rawKels.map((kl: any) => ({
-          name: String(typeof kl === 'string' ? kl : kl.name || ''),
-          status: kl.status || 'active',
-          nodesCount: Number(kl.nodesCount ?? kl.nodes ?? 12) || 12,
-        })),
-      };
-    });
+      const kelMap = new Map<string, any>();
+      for (const kl of rawKels) {
+        const kelName = String(typeof kl === 'string' ? kl : kl?.name || '').trim();
+        if (!kelName) continue;
+        kelMap.set(kelName.toLowerCase(), {
+          name: kelName,
+          status: kl?.status || 'active',
+          nodesCount: Number(kl?.nodesCount ?? kl?.nodes ?? 12) || 12,
+        });
+      }
+      kecMap.set(kecName.toLowerCase(), {
+        name: kecName,
+        kelurahans: Array.from(kelMap.values()),
+      });
+    }
 
-    const totalKelurahan = kecamatans.reduce((acc: number, k: any) => acc + (k.kelurahans?.length || 0), 0);
+    const kecamatans = Array.from(kecMap.values());
+    const existing = deduplicatedMap.get(key);
+    // Keep entry with more kecamatans if duplicate rows existed in sheet, otherwise latest
+    if (!existing || kecamatans.length >= (existing.kecamatans?.length || 0)) {
+      deduplicatedMap.set(key, {
+        cityName,
+        regionType: c.regionType === 'Kabupaten' || c.type === 'Kabupaten' ? 'Kabupaten' : 'Kota',
+        kecamatans,
+      });
+    }
+  }
+
+  return Array.from(deduplicatedMap.values()).map((c, idx) => {
+    const totalKelurahan = c.kecamatans.reduce(
+      (acc: number, k: any) => acc + (k.kelurahans?.length || 0),
+      0
+    );
     return {
-      id: Number(c.id) || idx + 1,
-      cityName: String(c.cityName || c.name || 'Wilayah'),
-      regionType: c.regionType === 'Kabupaten' || c.type === 'Kabupaten' ? 'Kabupaten' : 'Kota',
-      totalKecamatan: kecamatans.length,
+      id: idx + 1,
+      cityName: c.cityName,
+      regionType: c.regionType,
+      totalKecamatan: c.kecamatans.length,
       totalKelurahan,
-      kecamatans,
+      kecamatans: c.kecamatans,
     };
   });
 }
@@ -729,9 +777,9 @@ export function computeCoverageSummaryText(coverageList: CoverageAreaItem[]): st
 export function getLocalCoverage(): CoverageAreaItem[] {
   try {
     const raw = localStorage.getItem(COVERAGE_STORAGE_KEY);
-    if (raw) {
+    if (raw !== null) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
         return normalizeCoverageItems(parsed);
       }
     }
@@ -759,8 +807,11 @@ export function saveLocalCoverage(coverage: CoverageAreaItem[], syncToCloud = tr
 
   if (syncToCloud) {
     markLocalMutation();
-    syncToGoogleSheets('update_settings', updatedSettings).catch(() => {});
-    syncToGoogleSheets('update_coverage', { coverage: normalized }).catch(() => {});
+    syncToGoogleSheets('update_coverage', {
+      coverage: normalized,
+      coverageJson: JSON.stringify(normalized),
+      coverageText: summaryText,
+    }).catch(() => {});
   }
 
   broadcastDataUpdate('coverage');
@@ -772,13 +823,13 @@ export function addLocalCoverageCity(cityName: string, regionType: string): Cove
   const current = getLocalCoverage();
   const trimmed = cityName.trim();
   if (!trimmed) return current;
-  if (current.some((c) => c.cityName.toLowerCase() === trimmed.toLowerCase())) {
+  if (current.some((c) => c.cityName.trim().toLowerCase() === trimmed.toLowerCase())) {
     return current;
   }
   const next: CoverageAreaItem[] = [
     ...current,
     {
-      id: Date.now(),
+      id: current.length + 1,
       cityName: trimmed,
       regionType: regionType === 'Kabupaten' ? 'Kabupaten' : 'Kota',
       totalKecamatan: 0,
@@ -1141,11 +1192,15 @@ export async function fetchFromGoogleSheets(): Promise<{
       let resolvedPackages: WifiPackage[] | undefined;
       let resolvedCoverage: CoverageAreaItem[] | undefined;
 
-      if (Array.isArray(data.packages) && data.packages.length > 0 && !inCooldown) {
-        resolvedPackages = saveLocalPackages(data.packages, false);
+      // Always treat the dedicated Paket & Cakupan sheets (data.packages & data.coverage)
+      // as the authoritative source of truth when returned by Apps Script (even if empty array [])
+      if (Array.isArray(data.packages) && !inCooldown) {
+        if (data.packages.length > 0) {
+          resolvedPackages = saveLocalPackages(data.packages, false);
+        }
       }
 
-      if (Array.isArray(data.coverage) && data.coverage.length > 0 && !inCooldown) {
+      if (Array.isArray(data.coverage) && !inCooldown) {
         resolvedCoverage = saveLocalCoverage(data.coverage, false);
       }
 
@@ -1156,8 +1211,8 @@ export async function fetchFromGoogleSheets(): Promise<{
         const hadFormulaError = Boolean(rawSettings._hadFormulaError);
         delete rawSettings._hadFormulaError;
 
-        // Parse packagesJson & coverageJson stored inside Pengaturan sheet if present
-        if (rawSettings.packagesJson && !resolvedPackages) {
+        // Only fallback to Pengaturan JSON if the dedicated Paket/Cakupan sheets were not included in response
+        if (rawSettings.packagesJson && !Array.isArray(data.packages) && !resolvedPackages) {
           try {
             const parsedPkgs = JSON.parse(rawSettings.packagesJson);
             if (Array.isArray(parsedPkgs) && parsedPkgs.length > 0) {
@@ -1166,25 +1221,25 @@ export async function fetchFromGoogleSheets(): Promise<{
           } catch {}
         }
 
-        if (rawSettings.coverageJson && !resolvedCoverage) {
+        if (rawSettings.coverageJson && !Array.isArray(data.coverage) && !resolvedCoverage) {
           try {
             const parsedCov = JSON.parse(rawSettings.coverageJson);
-            if (Array.isArray(parsedCov) && parsedCov.length > 0) {
+            if (Array.isArray(parsedCov)) {
               resolvedCoverage = saveLocalCoverage(parsedCov, false);
             }
           } catch {}
         }
 
-        const activeCov = getLocalCoverage();
-        const computedCovText =
-          activeCov && activeCov.length > 0
-            ? computeCoverageSummaryText(activeCov)
-            : rawSettings.coverageText || currentLocal.coverageText;
+        const activeCov = resolvedCoverage !== undefined ? resolvedCoverage : getLocalCoverage();
+        const activePkgs = resolvedPackages !== undefined ? resolvedPackages : getLocalPackages();
+        const computedCovText = computeCoverageSummaryText(activeCov);
 
         normalizedSettings = {
           ...currentLocal,
           ...rawSettings,
           coverageText: computedCovText,
+          coverageJson: JSON.stringify(activeCov),
+          packagesJson: JSON.stringify(activePkgs),
           logoUrl:
             normalizeGoogleDriveImageUrl(rawSettings.logoUrl) ||
             currentLocal.logoUrl ||
@@ -1212,8 +1267,8 @@ export async function fetchFromGoogleSheets(): Promise<{
         customers: normalizedCustomers,
         tickets: normalizedTickets,
         settings: normalizedSettings || getLocalSettings(),
-        packages: resolvedPackages || getLocalPackages(),
-        coverage: resolvedCoverage || getLocalCoverage(),
+        packages: resolvedPackages !== undefined ? resolvedPackages : getLocalPackages(),
+        coverage: resolvedCoverage !== undefined ? resolvedCoverage : getLocalCoverage(),
       };
     }
   } catch (err) {
@@ -1232,46 +1287,61 @@ export async function syncToGoogleSheets(action: string, payload: any): Promise<
   };
   const bodyStr = JSON.stringify(bodyObj);
 
-  // Also notify local server webhook in background so server DB & SSE stay in sync across devices
+  markLocalMutation();
+
+  // Notify local server webhook with localOnly=true so server DB stays in sync without firing a duplicate POST to Apps Script
   try {
     fetch('/api/dev/sheets/webhook', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, payload, customUrl: url }),
+      body: JSON.stringify({ action, payload, customUrl: url, localOnly: true }),
     }).catch(() => {});
   } catch {}
 
   if (!url) return null;
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8',
-      },
-      body: bodyStr,
-      redirect: 'follow',
-    });
-
-    if (response.ok) {
-      const resJson = await response.json();
-      return resJson;
-    }
-  } catch {
+  // Serialize all POST requests to Google Apps Script through a single queue
+  // so two concurrent clearContent()+appendRow() operations never collide in Google Sheets
+  activeSheetsSyncCount++;
+  const task = sheetsSyncQueue.then(async () => {
     try {
-      await fetch(url, {
+      markLocalMutation();
+      const response = await fetch(url, {
         method: 'POST',
-        mode: 'no-cors',
         headers: {
           'Content-Type': 'text/plain;charset=utf-8',
         },
         body: bodyStr,
+        redirect: 'follow',
       });
-    } catch (innerErr) {
-      console.warn('Google Sheets background sync error:', innerErr);
+
+      markLocalMutation();
+      if (response.ok) {
+        const resJson = await response.json();
+        return resJson;
+      }
+    } catch {
+      try {
+        await fetch(url, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: {
+            'Content-Type': 'text/plain;charset=utf-8',
+          },
+          body: bodyStr,
+        });
+        markLocalMutation();
+      } catch (innerErr) {
+        console.warn('Google Sheets background sync error:', innerErr);
+      }
+    } finally {
+      activeSheetsSyncCount = Math.max(0, activeSheetsSyncCount - 1);
     }
-  }
-  return null;
+    return null;
+  });
+
+  sheetsSyncQueue = task.catch(() => null);
+  return task;
 }
 
 // ==========================================

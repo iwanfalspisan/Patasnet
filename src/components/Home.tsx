@@ -154,31 +154,11 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
 
     syncData();
 
-    fetch('/api/packages')
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (data && Array.isArray(data.packages) && data.packages.length > 0) {
-          saveLocalPackages(data.packages, false);
-          setPackagesList(getLocalPackages());
-        }
-      })
-      .catch(() => {});
-
     fetch('/api/settings/company')
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data && data.promos && data.promos.length > 0) {
           setPromosList(data.promos);
-        }
-      })
-      .catch(() => {});
-
-    fetch('/api/coverage')
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (Array.isArray(data) && data.length > 0) {
-          saveLocalCoverage(data, false);
-          setCoverageData(getLocalCoverage());
         }
       })
       .catch(() => {});
@@ -199,14 +179,13 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
     };
   }, []);
 
-  // Compute live coverage numbers from database or fallback to settings
-  const liveCitiesCount = coverageData.length > 0 ? coverageData.length : parseInt(coverageStats.cities) || 5;
-  const liveDistrictsCount = coverageData.length > 0
-    ? coverageData.reduce((acc, c) => acc + (c.kecamatans?.length || 0), 0)
-    : parseInt(coverageStats.districts) || 13;
-  const liveSubdistrictsCount = coverageData.length > 0
-    ? coverageData.reduce((acc, c) => acc + (c.kecamatans?.reduce((kAcc: number, k: any) => kAcc + (k.kelurahans?.length || 0), 0) || 0), 0)
-    : parseInt(coverageStats.subdistricts) || 40;
+  // Compute live coverage numbers from active coverage list
+  const liveCitiesCount = coverageData.length;
+  const liveDistrictsCount = coverageData.reduce((acc, c) => acc + (c.kecamatans?.length || 0), 0);
+  const liveSubdistrictsCount = coverageData.reduce(
+    (acc, c) => acc + (c.kecamatans?.reduce((kAcc: number, k: any) => kAcc + (k.kelurahans?.length || 0), 0) || 0),
+    0
+  );
 
   const preciseCoverageText = `${liveCitiesCount} Kota/Kabupaten, ${liveDistrictsCount} Kecamatan, ${liveSubdistrictsCount} Kelurahan`;
 

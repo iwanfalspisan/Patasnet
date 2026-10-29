@@ -59,19 +59,6 @@ export function CoverageDetails({ onSelectRegion }: CoverageDetailsProps) {
 
     syncCoverage();
 
-    fetch('/api/coverage')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const currentLocal = getLocalCoverage();
-          if (currentLocal.length === 0) {
-            saveLocalCoverage(data, false);
-            syncCoverage();
-          }
-        }
-      })
-      .catch(() => {});
-
     window.addEventListener('patasnet:data-updated', syncCoverage);
     window.addEventListener('storage', syncCoverage);
 

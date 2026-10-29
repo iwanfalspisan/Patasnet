@@ -39,6 +39,7 @@ import {
   fetchFromGoogleSheetsServer,
   getGoogleSheetsDatabase,
   mirrorExternalSheetsDataToServer,
+  recordToInternalSheetsDatabase,
 } from './src/lib/serverSheets.ts';
 import { GOOGLE_APPS_SCRIPT_TEMPLATE } from './src/lib/googleSheetsIntegration.ts';
 

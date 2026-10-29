@@ -688,6 +688,10 @@ function syncSheetCakupanData(ss, coverageList) {
 
 // 3. ENDPOINT POST (Menyimpan perubahan data ke Sheet & mengunggah Gambar ke Google Drive)
 function doPost(e) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(25000);
+  } catch (lockErr) {}
   try {
     setupDatabaseOtomatis();
     var rawBody = JSON.parse(e.postData.contents);
@@ -995,7 +999,6 @@ function doPost(e) {
               cell.setValue(strVal);
               sheetPeng.getRange(r + 1, 3).setValue(new Date());
               found = true;
-              break;
             }
           }
           if (!found) {
@@ -1117,6 +1120,8 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({ status: "unknown_action" })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    try { lock.releaseLock(); } catch (relErr) {}
   }
 }
 `;
