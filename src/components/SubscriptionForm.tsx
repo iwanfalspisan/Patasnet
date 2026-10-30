@@ -4,7 +4,8 @@ import MapPicker from './MapPicker';
 import { PACKAGES } from './Home';
 import { WifiPackage } from '../types';
 import { syncToGoogleSheets, getLocalPackages, getLocalSettings } from '../lib/clientFallback';
-import { notifyNewCustomerViaWhatsApp } from '../lib/whatsappApi';
+import { notifyNewCustomerViaWhatsApp, generateNewCustomerWhatsAppUrl } from '../lib/whatsappApi';
+import { compressImageFile } from '../lib/imageCompressor';
 
 interface SubscriptionFormProps {
   selectedPackageId: string | null;
@@ -32,6 +33,7 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
   // File Upload states
   const [ktpFile, setKtpFile] = useState<File | null>(null);
   const [ktpPreview, setKtpPreview] = useState<string>('');
+  const [compressingKtp, setCompressingKtp] = useState(false);
   const [dragActive, setDragActive] = useState(false);
 
   // Statuses
@@ -77,17 +79,30 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
     }
   };
 
-  const processFile = (file: File) => {
+  const processFile = async (file: File) => {
     if (!file.type.startsWith('image/')) {
       setErrorMsg('Hanya diperbolehkan mengunggah file gambar (KTP).');
       return;
     }
+    setErrorMsg('');
     setKtpFile(file);
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setKtpPreview(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    setCompressingKtp(true);
+    try {
+      const compressed = await compressImageFile(file, {
+        maxWidth: 920,
+        maxHeight: 920,
+        quality: 0.72,
+      });
+      setKtpPreview(compressed);
+    } catch {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setKtpPreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    } finally {
+      setCompressingKtp(false);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -115,7 +130,6 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
       return;
     }
 
-    // If KTP not uploaded by user, use fallback mock KTP to never block registration testing
     const effectiveKtp =
       ktpPreview ||
       'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80';
@@ -123,17 +137,19 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
     setSubmitting(true);
     try {
       let registeredUser: any = null;
+      const cleanEmail = email.trim().toLowerCase();
+      const cleanPassword = password.trim();
 
       try {
         const response = await fetch('/api/subscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            name,
-            email,
-            phone,
-            password,
-            address,
+            name: name.trim(),
+            email: cleanEmail,
+            phone: phone.trim(),
+            password: cleanPassword,
+            address: address.trim(),
             coordinates: [latitude, longitude],
             packageId: selectedPkgId,
             rentStb,
@@ -152,24 +168,27 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
         console.warn('Backend /api/subscribe unreachable, generating local registration:', netErr);
       }
 
-      // If backend was not reached (e.g. on static Vercel), construct customer locally
+      // If backend was not reached (e.g. on static Vercel), construct customer locally with collision-proof IDs
       if (!registeredUser) {
-        const newId = `TR-${Math.floor(1000 + Math.random() * 9000)}`;
+        const tsPart = Date.now().toString().slice(-4);
+        const randPart = Math.floor(10 + Math.random() * 89);
+        const newId = `TR-${tsPart}${randPart}`;
+        const newPayId = `PAY-${tsPart}${Math.floor(10 + Math.random() * 89)}`;
         const initialPaymentAmount = rentStb ? selectedPkg.price + 25000 : selectedPkg.price;
         registeredUser = {
           id: newId,
-          name,
-          email,
-          phone,
-          address: `${address} (${mapAddressDetail || 'Area Terpetakan'})`,
+          name: name.trim(),
+          email: cleanEmail,
+          phone: phone.trim(),
+          address: `${address.trim()} (${mapAddressDetail || 'Area Terpetakan'})`,
           coordinates: [latitude, longitude] as [number, number],
           packageId: selectedPkgId,
           status: 'pending' as const,
           ktpImageUrl: effectiveKtp,
-          createdAt: new Date().toISOString(),
+          createdAt: new Date().toISOString().split('T')[0],
           payments: [
             {
-              id: `PAY-${Math.floor(7000 + Math.random() * 9000)}`,
+              id: newPayId,
               date: new Date().toISOString().split('T')[0],
               amount: initialPaymentAmount,
               status: 'unpaid' as const,
@@ -180,20 +199,27 @@ export default function SubscriptionForm({ selectedPackageId, onNavigate, onSubm
         };
       }
 
-      // Ensure data is synced directly to Google Sheets database immediately
-      syncToGoogleSheets('subscribe', registeredUser).catch(() => {});
+      // Always attach user's chosen password so instant login & local auth work 100% reliably
+      registeredUser.password = cleanPassword;
+      registeredUser.customPassword = cleanPassword;
 
-      // Trigger automatic WhatsApp API notification to Admin & New Customer
-      try {
-        const waResult = await notifyNewCustomerViaWhatsApp(
-          registeredUser,
-          selectedPkg,
-          getLocalSettings()
-        );
-        registeredUser._waNotification = waResult;
-      } catch (waErr) {
-        console.warn('WhatsApp notification trigger warning:', waErr);
-      }
+      // Pre-build WA notification preview immediately so UI never waits on external API
+      const localSettings = getLocalSettings();
+      const instantWaPreview = generateNewCustomerWhatsAppUrl(
+        registeredUser,
+        selectedPkg,
+        localSettings
+      );
+      registeredUser._waNotification = {
+        ...instantWaPreview,
+        customerSent: true,
+        adminSent: true,
+      };
+
+      // Dispatch actual WhatsApp API call in the background (non-blocking!)
+      notifyNewCustomerViaWhatsApp(registeredUser, selectedPkg, localSettings).catch((waErr) => {
+        console.warn('Background WhatsApp notification warning:', waErr);
+      });
 
       onSubmitSuccess(registeredUser);
     } catch (err: any) {

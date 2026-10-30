@@ -5,6 +5,8 @@ import {
   getGoogleSheetsDatabase,
   saveGoogleSheetsDatabase,
   syncSheetsWebhook,
+  generateUniqueServerCustomerId,
+  generateUniqueServerPaymentId,
 } from '../lib/serverSheets.ts';
 import {
   normalizeGoogleDriveImageUrl,
@@ -230,6 +232,8 @@ function mapSheetsRowToCustomer(row: any[], db: ReturnType<typeof getGoogleSheet
     status: (row[8] || 'active') as 'pending' | 'active' | 'suspended',
     ktpImageUrl: normalizeGoogleDriveImageUrl(row[9]) || undefined,
     passwordHash: row[10] ? String(row[10]) : '8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918',
+    customPassword: row[11] ? String(row[11]) : undefined,
+    password: row[11] ? String(row[11]) : undefined,
     createdAt: String(row[0] || new Date().toISOString().split('T')[0]),
     payments,
     tickets,
@@ -248,14 +252,33 @@ export async function getCustomerById(id: string): Promise<CustomerUser | null> 
   return mapSheetsRowToCustomer(row, db);
 }
 
-export async function getCustomerByEmail(email: string) {
-  const cleanEmail = (email || '').trim().toLowerCase();
+export async function getAllCustomersByIdentifier(identifier: string) {
+  const cleanInput = (identifier || '').trim().toLowerCase();
+  const inputDigits = cleanInput.replace(/\D/g, '');
   const db = getGoogleSheetsDatabase();
-  const row = (db.sheets.Pelanggan || []).find(
-    (r) => String(r[3] || '').trim().toLowerCase() === cleanEmail
-  );
-  if (!row) return null;
-  return mapSheetsRowToCustomer(row, db);
+  const rows = (db.sheets.Pelanggan || []).filter((r) => {
+    const rowId = String(r[1] || '').trim().toLowerCase();
+    const rowEmail = String(r[3] || '').trim().toLowerCase();
+    const rowPhoneDigits = String(r[4] || '').replace(/\D/g, '');
+    if (rowEmail && rowEmail === cleanInput) return true;
+    if (rowId && rowId === cleanInput) return true;
+    if (
+      inputDigits.length >= 8 &&
+      rowPhoneDigits &&
+      (rowPhoneDigits === inputDigits ||
+        rowPhoneDigits.endsWith(inputDigits.slice(-9)) ||
+        inputDigits.endsWith(rowPhoneDigits.slice(-9)))
+    ) {
+      return true;
+    }
+    return false;
+  });
+  return rows.map((row) => mapSheetsRowToCustomer(row, db));
+}
+
+export async function getCustomerByEmail(identifier: string) {
+  const matches = await getAllCustomersByIdentifier(identifier);
+  return matches.length > 0 ? matches[0] : null;
 }
 
 export async function createCustomer(data: {
@@ -269,18 +292,31 @@ export async function createCustomer(data: {
   status: 'pending' | 'active' | 'suspended';
   ktpImageUrl?: string;
   passwordHash: string;
+  plainPassword?: string;
   createdAt: string;
   initialPayment: PaymentRecord;
 }) {
   const db = getGoogleSheetsDatabase();
-  const ktpUrl = persistImageForCrossDevice(data.ktpImageUrl, 'ktp', `KTP_${data.id}`);
+
+  // Guarantee 100% unique Customer ID so concurrent registrations NEVER overwrite each other
+  let finalCustId = data.id || generateUniqueServerCustomerId(db);
+  if (db.sheets.Pelanggan.some((r) => String(r[1]) === String(finalCustId))) {
+    finalCustId = generateUniqueServerCustomerId(db);
+  }
+
+  let finalPayId = data.initialPayment.id || generateUniqueServerPaymentId(db);
+  if (db.sheets.Pembayaran.some((p) => String(p[1]) === String(finalPayId))) {
+    finalPayId = generateUniqueServerPaymentId(db);
+  }
+
+  const ktpUrl = persistImageForCrossDevice(data.ktpImageUrl, 'ktp', `KTP_${finalCustId}`);
   const coordStr = Array.isArray(data.coordinates)
     ? data.coordinates.join(', ')
     : '-6.2088, 106.8456';
 
   const newRow = [
     data.createdAt,
-    data.id,
+    finalCustId,
     data.name,
     data.email.toLowerCase(),
     data.phone,
@@ -290,32 +326,26 @@ export async function createCustomer(data: {
     data.status,
     ktpUrl,
     data.passwordHash,
+    data.plainPassword || '',
   ];
 
-  const existingIdx = db.sheets.Pelanggan.findIndex((r) => String(r[1]) === String(data.id));
-  if (existingIdx >= 0) {
-    db.sheets.Pelanggan[existingIdx] = newRow;
-  } else {
-    db.sheets.Pelanggan.unshift(newRow);
-  }
+  // Always insert as a distinct row (never overwrite another registrant!)
+  db.sheets.Pelanggan.unshift(newRow);
 
-  const hasPay = db.sheets.Pembayaran.some((p) => String(p[1]) === String(data.initialPayment.id) || String(p[2]) === String(data.id));
-  if (!hasPay) {
-    db.sheets.Pembayaran.unshift([
-      data.initialPayment.date,
-      data.initialPayment.id,
-      data.id,
-      data.name,
-      data.initialPayment.amount,
-      data.initialPayment.billingPeriod,
-      data.initialPayment.method || 'QRIS / Transfer',
-      data.initialPayment.status,
-      persistImageForCrossDevice(data.initialPayment.proofOfPaymentUrl, 'proofs', `BUKTI_${data.initialPayment.id}`),
-    ]);
-  }
+  db.sheets.Pembayaran.unshift([
+    data.initialPayment.date,
+    finalPayId,
+    finalCustId,
+    data.name,
+    data.initialPayment.amount,
+    data.initialPayment.billingPeriod,
+    data.initialPayment.method || 'QRIS / Transfer',
+    data.initialPayment.status,
+    persistImageForCrossDevice(data.initialPayment.proofOfPaymentUrl, 'proofs', `BUKTI_${finalPayId}`),
+  ]);
 
   saveGoogleSheetsDatabase(db);
-  return await getCustomerById(data.id);
+  return await getCustomerById(finalCustId);
 }
 
 export async function updateCustomerStatus(id: string, status: 'pending' | 'active' | 'suspended') {

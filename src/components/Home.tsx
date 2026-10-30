@@ -322,39 +322,21 @@ export default function Home({ onSelectPackage, onNavigate, companyName, logoUrl
 
             {/* Slide Indicator Controls */}
             {heroSlides.length > 1 && (
-              <div className="pt-4 flex items-center justify-center lg:justify-start gap-3">
-                <button
-                  type="button"
-                  onClick={() => setCurrentHeroSlide((prev) => (prev - 1 + heroSlides.length) % heroSlides.length)}
-                  className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/15 transition active:scale-90"
-                  aria-label="Slide Sebelumnya"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
-                <div className="flex items-center gap-1.5">
-                  {heroSlides.map((_, idx) => {
-                    const active = idx === currentHeroSlide % heroSlides.length;
-                    return (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => setCurrentHeroSlide(idx)}
-                        className={`h-1.5 rounded-full transition-all duration-300 ${
-                          active ? 'w-7 bg-blue-400 shadow-sm shadow-blue-400/50' : 'w-2 bg-white/30 hover:bg-white/60'
-                        }`}
-                        aria-label={`Pilih Slide ${idx + 1}`}
-                      />
-                    );
-                  })}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setCurrentHeroSlide((prev) => (prev + 1) % heroSlides.length)}
-                  className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/15 transition active:scale-90"
-                  aria-label="Slide Berikutnya"
-                >
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
+              <div className="pt-4 flex items-center justify-center lg:justify-start gap-1.5">
+                {heroSlides.map((_, idx) => {
+                  const active = idx === currentHeroSlide % heroSlides.length;
+                  return (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setCurrentHeroSlide(idx)}
+                      className={`h-1.5 rounded-full transition-all duration-300 ${
+                        active ? 'w-7 bg-blue-400 shadow-sm shadow-blue-400/50' : 'w-2 bg-white/30 hover:bg-white/60'
+                      }`}
+                      aria-label={`Pilih Slide ${idx + 1}`}
+                    />
+                  );
+                })}
               </div>
             )}
           </div>

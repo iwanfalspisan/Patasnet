@@ -690,7 +690,7 @@ function syncSheetCakupanData(ss, coverageList) {
 function doPost(e) {
   var lock = LockService.getScriptLock();
   try {
-    lock.waitLock(25000);
+    lock.waitLock(30000);
   } catch (lockErr) {}
   try {
     setupDatabaseOtomatis();
@@ -704,8 +704,110 @@ function doPost(e) {
     for (var rk in rawBody) {
       if (rk !== "data") payload[rk] = rawBody[rk];
     }
-    var action = payload.action || "subscribe";
+    var action = payload.action || ((payload.sender && payload.message) ? "whatsapp_webhook" : "subscribe");
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // 0. WEBHOOK BOT AUTO-REPLY WHATSAPP 24 JAM (FONNTE / GATEWAY)
+    if (action === "whatsapp_webhook") {
+      var sender = String(payload.sender || payload.phone || "").trim();
+      var incomingText = String(payload.message || payload.text || "").trim();
+      if (!sender || !incomingText) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "ignored" })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      var sheetPeng = ss.getSheetByName("Pengaturan");
+      var waCfg = {};
+      var companyName = "Patas.Net";
+      var adminPhone = "0899-3299-977";
+      if (sheetPeng && sheetPeng.getLastRow() > 1) {
+        var sRows = sheetPeng.getDataRange().getValues();
+        for (var sr = 1; sr < sRows.length; sr++) {
+          var sKey = String(sRows[sr][0]).trim();
+          var sVal = String(sRows[sr][1] || "");
+          if (sKey === "name" && sVal) companyName = sVal;
+          if (sKey === "whatsappNumber" && sVal) adminPhone = sVal;
+          if (sKey === "whatsappConfigJson" && sVal) {
+            try { waCfg = JSON.parse(sVal); } catch (e) {}
+          }
+        }
+      }
+
+      if (waCfg.botAutoReplyEnabled === false) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "disabled" })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      var sheetPaket = ss.getSheetByName("Paket");
+      var pkgLines = [];
+      if (sheetPaket && sheetPaket.getLastRow() > 1) {
+        var pData = sheetPaket.getDataRange().getValues();
+        for (var pi = 1; pi < pData.length; pi++) {
+          if (pData[pi][1]) {
+            pkgLines.push(pi + ". *" + pData[pi][1] + "* (" + pData[pi][2] + ") — *Rp " + Number(pData[pi][3] || 0).toLocaleString("id-ID") + "/bln*");
+          }
+        }
+      }
+      var packagesFormatted = pkgLines.length > 0 ? pkgLines.join("\n") : "• Paket Home Fiber 20 Mbps — Rp 170.000/bln";
+
+      var sheetCakupan = ss.getSheetByName("Cakupan");
+      var covLines = [];
+      if (sheetCakupan && sheetCakupan.getLastRow() > 1) {
+        var cData = sheetCakupan.getDataRange().getValues();
+        for (var ci = 1; ci < cData.length; ci++) {
+          if (cData[ci][1]) {
+            covLines.push("• *" + (cData[ci][2] || "Kota") + " " + cData[ci][1] + "*");
+          }
+        }
+      }
+      var coverageFormatted = covLines.length > 0 ? covLines.join("\n") : "• Area Layanan Fiber Optik Aktif";
+
+      var replaceBotVars = function(txt) {
+        return String(txt || "")
+          .replace(/\{\{company_name\}\}|\{company_name\}/g, companyName)
+          .replace(/\{\{packages_list\}\}|\{packages_list\}/g, packagesFormatted)
+          .replace(/\{\{coverage_list\}\}|\{coverage_list\}/g, coverageFormatted)
+          .replace(/\{\{admin_phone\}\}|\{admin_phone\}/g, waCfg.adminPhone || adminPhone);
+      };
+
+      var lower = incomingText.toLowerCase();
+      var botReply = "";
+
+      if (Array.isArray(waCfg.botRules)) {
+        for (var ri = 0; ri < waCfg.botRules.length; ri++) {
+          var rule = waCfg.botRules[ri];
+          if (!rule.active) continue;
+          var kws = String(rule.keywords || "").split(",");
+          for (var ki = 0; ki < kws.length; ki++) {
+            var kw = kws[ki].trim().toLowerCase();
+            if (kw && (lower === kw || lower.indexOf(kw) !== -1)) {
+              botReply = replaceBotVars(rule.reply);
+              break;
+            }
+          }
+          if (botReply) break;
+        }
+      }
+
+      if (!botReply) {
+        botReply = replaceBotVars(waCfg.botDefaultReply || ("🤖 *Asisten Bot Otomatis " + companyName + "*\n\nSilakan ketik *PAKET*, *CAKUPAN*, *TAGIHAN*, *BAYAR*, atau *GANGGUAN* untuk informasi instan."));
+      }
+
+      if (waCfg.apiKey) {
+        try {
+          UrlFetchApp.fetch(waCfg.endpointUrl || waCfg.apiUrl || "https://api.fonnte.com/send", {
+            method: "post",
+            headers: { Authorization: String(waCfg.apiKey).trim() },
+            payload: {
+              target: sender,
+              message: botReply,
+              countryCode: "62"
+            },
+            muteHttpExceptions: true
+          });
+        } catch (waErr) {}
+      }
+
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", reply: botReply })).setMimeType(ContentService.MimeType.JSON);
+    }
 
     if (action === "subscribe") {
       var sheet = ss.getSheetByName("Pelanggan");
@@ -715,40 +817,60 @@ function doPost(e) {
         if (uploadedKtp) ktpUrl = uploadedKtp;
       }
 
-      var newCustId = payload.id || ("TR-" + Math.floor(1000 + Math.random() * 9000));
+      var newCustId = payload.id || ("TR-" + String(Date.now()).slice(-4) + Math.floor(10 + Math.random() * 89));
       var safePhone = String(payload.phone || "");
       if (safePhone.indexOf("+") === 0 || safePhone.indexOf("=") === 0) {
         safePhone = "'" + safePhone;
       }
-      sheet.appendRow([
-        new Date(),
-        newCustId,
-        payload.name || "",
-        payload.email || "",
-        safePhone,
-        payload.address || "",
-        Array.isArray(payload.coordinates) ? payload.coordinates.join(", ") : (payload.coordinates || "-6.2088, 106.8456"),
-        payload.packageId || "home-20m",
-        payload.status || "pending",
-        ktpUrl,
-        payload.password || "user123"
-      ]);
 
-      var sheetPay = ss.getSheetByName("Pembayaran");
-      var payId = payload.paymentId || ("PAY-" + Math.floor(7000 + Math.random() * 9000));
-      sheetPay.appendRow([
-        new Date(),
-        payId,
-        newCustId,
-        payload.name || "",
-        payload.amount || 170000,
-        payload.billingPeriod || "Bulan Pertama",
-        "QRIS / Transfer",
-        "unpaid",
-        "",
-        ""
-      ]);
+      // Cegah bentrok ID atau duplikasi saat ada banyak pendaftar bersamaan
+      var existingPelRows = sheet.getLastRow() > 1 ? sheet.getDataRange().getValues() : [];
+      var existingSameRetryRow = -1;
+      for (var ep = 1; ep < existingPelRows.length; ep++) {
+        if (String(existingPelRows[ep][1]) === String(newCustId)) {
+          if (String(existingPelRows[ep][3]).trim().toLowerCase() === String(payload.email || "").trim().toLowerCase() &&
+              String(existingPelRows[ep][2]).trim().toLowerCase() === String(payload.name || "").trim().toLowerCase()) {
+            existingSameRetryRow = ep + 1;
+          } else {
+            // ID bentrok dengan pendaftar lain yang mendaftar di detik yang sama -> buat ID unik baru agar tidak menumpuk
+            newCustId = "TR-" + String(Date.now()).slice(-4) + Math.floor(10 + Math.random() * 89);
+          }
+          break;
+        }
+      }
 
+      if (existingSameRetryRow === -1) {
+        sheet.appendRow([
+          new Date(),
+          newCustId,
+          payload.name || "",
+          payload.email || "",
+          safePhone,
+          payload.address || "",
+          Array.isArray(payload.coordinates) ? payload.coordinates.join(", ") : (payload.coordinates || "-6.2088, 106.8456"),
+          payload.packageId || "home-20m",
+          payload.status || "pending",
+          ktpUrl,
+          payload.password || "user123"
+        ]);
+
+        var sheetPay = ss.getSheetByName("Pembayaran");
+        var payId = payload.paymentId || ("PAY-" + String(Date.now()).slice(-4) + Math.floor(10 + Math.random() * 89));
+        sheetPay.appendRow([
+          new Date(),
+          payId,
+          newCustId,
+          payload.name || "",
+          payload.amount || 170000,
+          payload.billingPeriod || "Bulan Pertama",
+          "QRIS / Transfer",
+          "unpaid",
+          "",
+          ""
+        ]);
+      }
+
+      SpreadsheetApp.flush();
       return ContentService.createTextOutput(JSON.stringify({
         status: "success",
         message: "Data pelanggan berhasil disimpan di Google Sheet & Google Drive!",
@@ -1121,6 +1243,7 @@ function doPost(e) {
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
   } finally {
+    try { SpreadsheetApp.flush(); } catch (flushErr) {}
     try { lock.releaseLock(); } catch (relErr) {}
   }
 }

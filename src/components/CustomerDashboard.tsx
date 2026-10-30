@@ -40,6 +40,7 @@ import {
   addLocalTicket,
 } from '../lib/clientFallback';
 import { generateDefaultQrisSvg } from '../lib/qrisUtils';
+import { compressImageFile } from '../lib/imageCompressor';
 import Logo from './Logo';
 
 interface CustomerDashboardProps {
@@ -193,13 +194,22 @@ export default function CustomerDashboard({
     }
   };
 
-  const handleProofOfPaymentUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
+  const handleProofOfPaymentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const compressed = await compressImageFile(file, {
+        maxWidth: 920,
+        maxHeight: 920,
+        quality: 0.72,
+      });
+      setProofImage(compressed);
+    } catch {
       const reader = new FileReader();
       reader.onloadend = () => {
         setProofImage(reader.result as string);
       };
-      reader.readAsDataURL(e.target.files[0]);
+      reader.readAsDataURL(file);
     }
   };
 
@@ -208,57 +218,37 @@ export default function CustomerDashboard({
     if (!selectedPayment || !proofImage) return;
 
     setSubmittingPayment(true);
-    // Update local state immediately for instant feedback
-    submitLocalPaymentProof(user.id, selectedPayment.id, proofImage, paymentMethod);
+    const paymentIdToVerify = selectedPayment.id;
+    const proofToSend = proofImage;
+    const methodToSend = paymentMethod;
 
-    // Broadcast to cloud for instant real-time admin sync
-    const updatedPayments = (user.payments || []).map((p) =>
-      p.id === selectedPayment.id
-        ? {
-            ...p,
-            status: 'pending_verification' as const,
-            proofOfPaymentUrl: proofImage,
-            method: paymentMethod,
-          }
-        : p
-    );
-    syncToGoogleSheets('submit_payment_proof', {
-      userId: user.id,
-      userName: user.name,
-      paymentId: selectedPayment.id,
-      proofBase64: proofImage,
-      method: paymentMethod,
-      amount: selectedPayment.amount,
-      billingPeriod: selectedPayment.billingPeriod,
-    }).catch(() => {});
+    // 1. Update local state & queue background Google Sheets sync immediately
+    submitLocalPaymentProof(user.id, paymentIdToVerify, proofToSend, methodToSend);
 
-    try {
-      const response = await fetch('/api/payments/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.id,
-          paymentId: selectedPayment.id,
-          method: paymentMethod,
-          proofOfPaymentUrlBase64: proofImage
-        })
+    // 2. Show success state immediately so customer never waits on slow network
+    setPaymentSuccess(true);
+    setProofImage('');
+    setSelectedPayment(null);
+    setSubmittingPayment(false);
+    onRefreshUser();
+
+    // 3. Sync with server API in the background
+    fetch('/api/payments/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: user.id,
+        paymentId: paymentIdToVerify,
+        method: methodToSend,
+        proofOfPaymentUrlBase64: proofToSend,
+      }),
+    })
+      .then((res) => {
+        if (res.ok) onRefreshUser();
+      })
+      .catch((err) => {
+        console.warn('Backend payment verify background sync warning:', err);
       });
-
-      if (response.ok) {
-        setPaymentSuccess(true);
-        setProofImage('');
-        setSelectedPayment(null);
-        onRefreshUser(); // Refresh user state to show updated pending status
-      }
-    } catch (err) {
-      console.warn('Backend payment verify failed, updated locally:', err);
-      setPaymentSuccess(true);
-      setProofImage('');
-      setSelectedPayment(null);
-      onRefreshUser();
-    } finally {
-      setSubmittingPayment(false);
-    }
   };
 
   const handleInstantQrisPayment = async () => {

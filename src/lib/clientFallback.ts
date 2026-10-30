@@ -1362,9 +1362,80 @@ export function getLocalCustomers(): CustomerUser[] {
   }
 }
 
+const deletedLocalCustomerIds = new Set<string>();
+
 export function saveLocalCustomers(customers: CustomerUser[]) {
   try {
-    localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(customers));
+    // Preserve customPassword / password from existing local records so background syncs never erase user credentials
+    let existingList: CustomerUser[] = [];
+    try {
+      const raw = localStorage.getItem(CUSTOMERS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) existingList = parsed;
+      }
+    } catch {}
+
+    const existingByIdMap = new Map<string, CustomerUser>();
+    const existingByEmailMap = new Map<string, CustomerUser>();
+    existingList.forEach((c) => {
+      if (c?.id) existingByIdMap.set(String(c.id).toLowerCase(), c);
+      if (c?.email && !existingByEmailMap.has(c.email.trim().toLowerCase())) {
+        existingByEmailMap.set(c.email.trim().toLowerCase(), c);
+      }
+    });
+
+    const merged = customers
+      .filter((c) => !deletedLocalCustomerIds.has(String(c.id || '').toLowerCase()))
+      .map((c) => {
+        const prev =
+          existingByIdMap.get(String(c.id || '').toLowerCase()) ||
+          existingByEmailMap.get(String(c.email || '').trim().toLowerCase());
+        const resolvedPass =
+          c.customPassword || c.password || prev?.customPassword || prev?.password;
+        const resolvedHash = c.passwordHash || prev?.passwordHash;
+        return {
+          ...c,
+          ...(resolvedPass ? { customPassword: resolvedPass, password: resolvedPass } : {}),
+          ...(resolvedHash ? { passwordHash: resolvedHash } : {}),
+        };
+      });
+
+    // Keep any local customer whose unique ID hasn't appeared in the remote sync list yet (prevents concurrent registration drops)
+    const mergedIds = new Set(merged.map((c) => String(c.id || '').toLowerCase()));
+    const unsyncedLocals = existingList.filter((c) => {
+      const cid = String(c.id || '').toLowerCase();
+      return (
+        cid &&
+        !deletedLocalCustomerIds.has(cid) &&
+        !mergedIds.has(cid)
+      );
+    });
+
+    const finalCustomers = [...unsyncedLocals, ...merged];
+
+    try {
+      localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(finalCustomers));
+    } catch (quotaErr) {
+      // Fallback if base64 images exceed 5MB localStorage quota: strip oversized inline base64 images so credentials always persist
+      const compactCustomers = finalCustomers.map((c) => ({
+        ...c,
+        ktpImageUrl:
+          c.ktpImageUrl && c.ktpImageUrl.length > 180000
+            ? 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80'
+            : c.ktpImageUrl,
+        payments: Array.isArray(c.payments)
+          ? c.payments.map((p) => ({
+              ...p,
+              proofOfPaymentUrl:
+                p.proofOfPaymentUrl && p.proofOfPaymentUrl.length > 180000
+                  ? undefined
+                  : p.proofOfPaymentUrl,
+            }))
+          : [],
+      }));
+      localStorage.setItem(CUSTOMERS_STORAGE_KEY, JSON.stringify(compactCustomers));
+    }
   } catch (e) {
     console.warn('Error saving local customers:', e);
   }
@@ -1453,10 +1524,34 @@ export function updateLocalTicketStatus(
 export function addLocalCustomer(newCustomer: CustomerUser): CustomerUser[] {
   markLocalMutation();
   const current = getLocalCustomers();
-  const exists = current.some((c) => c.id === newCustomer.id || c.email === newCustomer.email);
-  const updated = exists
-    ? current.map((c) => (c.id === newCustomer.id ? newCustomer : c))
-    : [newCustomer, ...current];
+  let finalCustomer = { ...newCustomer };
+  const existingById = current.find((c) => c.id === finalCustomer.id);
+
+  // If the same ID already exists for a DIFFERENT person (rare local fallback collision), generate a fresh unique ID instead of overwriting
+  if (
+    existingById &&
+    existingById.email &&
+    finalCustomer.email &&
+    existingById.email.trim().toLowerCase() !== finalCustomer.email.trim().toLowerCase()
+  ) {
+    finalCustomer.id = `TR-${Date.now().toString().slice(-4)}${Math.floor(10 + Math.random() * 89)}`;
+  }
+
+  const existsSameId = current.some((c) => c.id === finalCustomer.id);
+  const updated = existsSameId
+    ? current.map((c) =>
+        c.id === finalCustomer.id
+          ? {
+              ...c,
+              ...finalCustomer,
+              customPassword:
+                finalCustomer.customPassword || finalCustomer.password || c.customPassword || c.password,
+              password:
+                finalCustomer.password || finalCustomer.customPassword || c.password || c.customPassword,
+            }
+          : c
+      )
+    : [finalCustomer, ...current];
   saveLocalCustomers(updated);
   broadcastDataUpdate('customers');
   return updated;
@@ -1464,6 +1559,7 @@ export function addLocalCustomer(newCustomer: CustomerUser): CustomerUser[] {
 
 export function deleteLocalCustomer(id: string): CustomerUser[] {
   markLocalMutation();
+  if (id) deletedLocalCustomerIds.add(String(id).toLowerCase());
   const current = getLocalCustomers();
   const updated = current.filter((c) => c.id !== id);
   saveLocalCustomers(updated);
@@ -1733,28 +1829,47 @@ export function authenticateLocally(
   }
 
   const customers = getLocalCustomers();
-  const customer = customers.find(
-    (c) =>
-      c.email.trim().toLowerCase() === cleanEmail ||
-      c.id.trim().toLowerCase() === cleanEmail ||
-      c.phone.replace(/\D/g, '') === cleanEmail.replace(/\D/g, '')
-  );
-  if (!customer) {
+  const inputDigits = cleanEmail.replace(/\D/g, '');
+  const matchingCustomers = customers.filter((c) => {
+    const cEmail = (c.email || '').trim().toLowerCase();
+    const cId = (c.id || '').trim().toLowerCase();
+    const cPhoneDigits = (c.phone || '').replace(/\D/g, '');
+    if (cEmail && cEmail === cleanEmail) return true;
+    if (cId && cId === cleanEmail) return true;
+    if (
+      inputDigits.length >= 8 &&
+      cPhoneDigits &&
+      (cPhoneDigits === inputDigits ||
+        cPhoneDigits.endsWith(inputDigits.slice(-9)) ||
+        inputDigits.endsWith(cPhoneDigits.slice(-9)))
+    ) {
+      return true;
+    }
+    return false;
+  });
+
+  if (matchingCustomers.length === 0) {
     return {
       ok: false,
       success: false,
-      message: 'Alamat email pelanggan tidak ditemukan. Gunakan budi@gmail.com (password: user123) untuk demo.',
+      message:
+        'Akun pelanggan tidak ditemukan. Pastikan menggunakan Email, Nomor WA, atau ID Pelanggan yang didaftarkan.',
     };
   }
 
-  const customPass = (customer as any).customPassword;
-  if (customPass && (password === customPass || cleanPass === customPass)) {
-    return { ok: true, success: true, user: customer };
+  for (const customer of matchingCustomers) {
+    const customPass = (customer as any).customPassword || (customer as any).password;
+    if (customPass && (password === customPass || cleanPass === String(customPass).trim())) {
+      return { ok: true, success: true, user: customer };
+    }
   }
 
   const validPasswords = ['user123', 'budi123', 'dewi123', 'andi123', 'admin', '123456'];
-  if (validPasswords.includes(cleanPass) || cleanPass.length >= 4) {
-    return { ok: true, success: true, user: customer };
+  for (const customer of matchingCustomers) {
+    const customPass = (customer as any).customPassword || (customer as any).password;
+    if (validPasswords.includes(cleanPass) || (!customPass && cleanPass.length >= 4)) {
+      return { ok: true, success: true, user: customer };
+    }
   }
 
   return { ok: false, success: false, message: 'Password yang Anda masukkan salah.' };

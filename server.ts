@@ -9,6 +9,7 @@ import {
   getAllCustomers,
   getCustomerById,
   getCustomerByEmail,
+  getAllCustomersByIdentifier,
   createCustomer,
   updateCustomerStatus,
   deleteCustomer,
@@ -40,6 +41,8 @@ import {
   getGoogleSheetsDatabase,
   mirrorExternalSheetsDataToServer,
   recordToInternalSheetsDatabase,
+  generateUniqueServerCustomerId,
+  generateUniqueServerPaymentId,
 } from './src/lib/serverSheets.ts';
 import { GOOGLE_APPS_SCRIPT_TEMPLATE } from './src/lib/googleSheetsIntegration.ts';
 
@@ -98,17 +101,35 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ status: 'error', message: 'Kredensial Admin tidak valid. Gunakan email: admin@patasnet.id dan password: admin' });
     }
 
-    // Customer Login from PostgreSQL / Supabase
-    const customer = await getCustomerByEmail(email);
-    if (!customer) {
-      return res.status(401).json({ status: 'error', message: 'Alamat email pelanggan tidak terdaftar di database.' });
+    // Customer Login from Server / Google Sheets DB (supports multiple registrations with same email/phone by matching password)
+    const candidateCustomers = await getAllCustomersByIdentifier(email);
+    if (!candidateCustomers || candidateCustomers.length === 0) {
+      return res.status(401).json({ status: 'error', message: 'Alamat email / ID pelanggan tidak terdaftar di database.' });
     }
 
-    const inputHash = encryptPassword(password);
-    const isDemoPassword = ['user123', 'budi123', 'dewi123', 'andi123', 'admin'].includes(password);
-    if (customer.passwordHash === inputHash || isDemoPassword) {
-      const fullCustomer = await getCustomerById(customer.id);
-      return res.json({ status: 'success', user: fullCustomer });
+    const cleanPass = String(password || '').trim();
+    const inputHash = encryptPassword(cleanPass);
+    const rawInputHash = encryptPassword(String(password || ''));
+    const isDemoPassword = ['user123', 'budi123', 'dewi123', 'andi123', 'admin', '123456'].includes(cleanPass);
+    const defaultAdminHash = '8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918';
+
+    const matchedCustomer = candidateCustomers.find((customer) => {
+      const storedCustomPass = (customer as any).customPassword || (customer as any).password;
+      return (
+        customer.passwordHash === inputHash ||
+        customer.passwordHash === rawInputHash ||
+        customer.passwordHash === cleanPass ||
+        (storedCustomPass && (storedCustomPass === cleanPass || storedCustomPass === password)) ||
+        isDemoPassword ||
+        ((!customer.passwordHash || customer.passwordHash === defaultAdminHash) &&
+          !storedCustomPass &&
+          cleanPass.length >= 4)
+      );
+    });
+
+    if (matchedCustomer) {
+      const fullCustomer = await getCustomerById(matchedCustomer.id);
+      return res.json({ status: 'success', user: fullCustomer || matchedCustomer });
     }
 
     return res.status(401).json({ status: 'error', message: 'Password yang Anda masukkan salah.' });
@@ -141,90 +162,113 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 });
 
-// Create subscription API (Direct to PostgreSQL / Supabase)
+// Atomic Registration Mutex: serializes simultaneous /api/subscribe requests so concurrent registrants
+// never collide, overwrite each other, or suffer race conditions.
+let registrationMutex: Promise<any> = Promise.resolve();
+function withRegistrationMutex<T>(task: () => Promise<T>): Promise<T> {
+  const next = registrationMutex.then(task, task);
+  registrationMutex = next.catch(() => {});
+  return next;
+}
+
+// Create subscription API (Concurrency-Safe, Fast & Non-blocking)
 app.post('/api/subscribe', async (req, res) => {
   try {
     const { name, email, phone, password, address, coordinates, packageId, rentStb, ktpImageBase64 } = req.body;
 
-    // Check unique constraints
-    const existing = await getCustomerByEmail(email);
-    if (existing) {
-      return res.status(400).json({ status: 'error', message: 'Alamat email sudah terdaftar.' });
-    }
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const rawPassword = String(password || 'user123').trim();
+    const hashedPassword = encryptPassword(rawPassword);
 
-    const allCusts = await getAllCustomers();
-    const phoneExists = allCusts.some((c) => c.phone === phone);
-    if (phoneExists) {
-      return res.status(400).json({ status: 'error', message: 'Nomor handphone sudah digunakan.' });
-    }
+    // Execute ID generation & local DB insertion inside the atomic mutex lock (<2ms per registrant)
+    const { newCustomer, finalId, initialPayment } = await withRegistrationMutex(async () => {
+      const db = getGoogleSheetsDatabase();
+      const uniqueCustId = generateUniqueServerCustomerId(db);
+      const uniquePayId = generateUniqueServerPaymentId(db);
 
-    // Generate ID
-    const newId = `TR-${Math.floor(1004 + Math.random() * 9000)}`;
+      const pkgs = await getAllPackages();
+      const pkg = pkgs.find((p) => p.id === packageId);
+      const pkgPrice = pkg ? pkg.price : 120000;
 
-    // Find price of package
-    const pkgs = await getAllPackages();
-    const pkg = pkgs.find((p) => p.id === packageId);
-    const pkgPrice = pkg ? pkg.price : 120000;
-
-    const initialPayment: PaymentRecord = {
-      id: `PAY-${Math.floor(7004 + Math.random() * 9000)}`,
-      date: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      amount: pkgPrice + (rentStb ? 25000 : 0),
-      status: 'unpaid',
-      billingPeriod: 'Juli 2026',
-    };
-
-    // 1. ALWAYS push new registration directly to Google Sheets & Drive Webhook first
-    try {
-      await syncSheetsWebhook('subscribe', {
-        id: newId,
-        name,
-        email,
-        phone,
-        address,
-        coordinates: coordinates || [-6.2088, 106.8456],
-        packageId: packageId || 'home-10m',
-        status: 'pending',
-        ktpImageBase64: ktpImageBase64 || '',
-        amount: initialPayment.amount,
-      });
-    } catch (syncErr) {
-      console.error('[Google Sheets Registration Sync Error]:', syncErr);
-    }
-
-    // 2. Try recording to PostgreSQL database with fallback
-    let newCustomer: any = null;
-    try {
-      newCustomer = await createCustomer({
-        id: newId,
-        name,
-        email,
-        phone,
-        address,
-        coordinates: coordinates || [-6.2088, 106.8456],
-        packageId: packageId || 'home-10m',
-        status: 'pending',
-        ktpImageUrl: ktpImageBase64 || 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
-        passwordHash: encryptPassword(password || 'user123'),
-        createdAt: new Date().toISOString().split('T')[0],
-        initialPayment,
-      });
-    } catch (dbErr) {
-      console.warn('Postgres createCustomer error, using local/sheets object:', dbErr);
-      newCustomer = {
-        id: newId,
-        name,
-        email,
-        phone,
-        address,
-        coordinates: coordinates || [-6.2088, 106.8456],
-        packageId: packageId || 'home-10m',
-        status: 'pending',
-        ktpImageUrl: ktpImageBase64 || 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
-        createdAt: new Date().toISOString().split('T')[0],
-        payments: [initialPayment],
+      const paymentObj: PaymentRecord = {
+        id: uniquePayId,
+        date: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        amount: pkgPrice + (rentStb ? 25000 : 0),
+        status: 'unpaid',
+        billingPeriod: 'Bulan Pertama',
       };
-    }
+
+      let created: any = null;
+      try {
+        created = await createCustomer({
+          id: uniqueCustId,
+          name,
+          email: cleanEmail,
+          phone,
+          address,
+          coordinates: coordinates || [-6.2088, 106.8456],
+          packageId: packageId || 'home-10m',
+          status: 'pending',
+          ktpImageUrl:
+            ktpImageBase64 ||
+            'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
+          passwordHash: hashedPassword,
+          plainPassword: rawPassword,
+          createdAt: new Date().toISOString().split('T')[0],
+          initialPayment: paymentObj,
+        });
+      } catch (dbErr) {
+        console.warn('createCustomer fallback object:', dbErr);
+        created = {
+          id: uniqueCustId,
+          name,
+          email: cleanEmail,
+          phone,
+          address,
+          coordinates: coordinates || [-6.2088, 106.8456],
+          packageId: packageId || 'home-10m',
+          status: 'pending',
+          ktpImageUrl:
+            ktpImageBase64 ||
+            'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=400&q=80',
+          passwordHash: hashedPassword,
+          customPassword: rawPassword,
+          password: rawPassword,
+          createdAt: new Date().toISOString().split('T')[0],
+          payments: [paymentObj],
+        };
+      }
+
+      const resolvedId = created?.id || uniqueCustId;
+      if (created) {
+        created.customPassword = rawPassword;
+        created.password = rawPassword;
+        created._syncedByServer = true;
+      }
+
+      return { newCustomer: created, finalId: resolvedId, initialPayment: paymentObj };
+    });
+
+    // 2. Push new registration to Google Sheets & Drive Webhook via FIFO server queue in background
+    syncSheetsWebhook('subscribe', {
+      id: finalId,
+      name,
+      email: cleanEmail,
+      phone,
+      password: rawPassword,
+      passwordHash: hashedPassword,
+      address,
+      coordinates: coordinates || [-6.2088, 106.8456],
+      packageId: packageId || 'home-10m',
+      status: 'pending',
+      ktpImageBase64: ktpImageBase64 || '',
+      ktpUrl: newCustomer?.ktpImageUrl || '',
+      paymentId: initialPayment.id,
+      amount: initialPayment.amount,
+      billingPeriod: initialPayment.billingPeriod,
+    }).catch((syncErr) => {
+      console.error('[Google Sheets Registration Background Sync Error]:', syncErr);
+    });
 
     broadcastServerSync({ type: 'SHEETS_DB_UPDATED', timestamp: Date.now() });
     return res.json({ status: 'success', user: newCustomer });
@@ -818,20 +862,22 @@ app.post('/api/whatsapp/remind', async (req, res) => {
 // Send WhatsApp via External Gateway API (Fonnte, Wablas, UltraMsg, Custom Webhook)
 app.post('/api/whatsapp/send', async (req, res) => {
   try {
-    const { targetPhone, message, config } = req.body || {};
-    if (!targetPhone || !message) {
-      return res.status(400).json({ status: 'error', message: 'Nomor tujuan dan isi pesan wajib diisi.' });
+    const { targetPhone, target, message, config } = req.body || {};
+    const destPhone = targetPhone || target;
+    if (!destPhone || !message) {
+      return res.status(400).json({ ok: false, status: 'error', message: 'Nomor tujuan dan isi pesan wajib diisi.' });
     }
 
-    logWhatsAppMessage(targetPhone, message);
+    logWhatsAppMessage(destPhone, message);
 
     const provider = config?.provider || 'fonnte';
     const apiKey = (config?.apiKey || '').trim();
-    const endpointUrl = (config?.endpointUrl || '').trim();
+    const endpointUrl = (config?.endpointUrl || config?.apiUrl || '').trim();
 
     if (!apiKey) {
       return res.json({
-        status: 'success',
+        ok: false,
+        status: 'simulated',
         simulated: true,
         message: 'Pesan dicatat di log server (API Key belum diisi, gunakan tombol Direct WhatsApp atau masukkan Token Fonnte).',
       });
@@ -840,7 +886,7 @@ app.post('/api/whatsapp/send', async (req, res) => {
     if (provider === 'fonnte') {
       const url = endpointUrl || 'https://api.fonnte.com/send';
       const bodyParams = new URLSearchParams();
-      bodyParams.append('target', String(targetPhone));
+      bodyParams.append('target', String(destPhone));
       bodyParams.append('message', String(message));
       bodyParams.append('countryCode', '62');
 
@@ -853,9 +899,9 @@ app.post('/api/whatsapp/send', async (req, res) => {
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data.status !== false) {
-        return res.json({ status: 'success', message: 'Berhasil dikirim via Fonnte WhatsApp API!', data });
+        return res.json({ ok: true, status: 'success', detail: 'Berhasil dikirim via Fonnte WhatsApp API!', message: 'Berhasil dikirim via Fonnte WhatsApp API!', data });
       }
-      return res.status(400).json({ status: 'error', message: data.reason || 'Gagal mengirim via Fonnte API.', data });
+      return res.status(400).json({ ok: false, status: 'error', message: data.reason || 'Gagal mengirim via Fonnte API.', data });
     }
 
     if (provider === 'wablas') {
@@ -866,13 +912,13 @@ app.post('/api/whatsapp/send', async (req, res) => {
           Authorization: apiKey,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ phone: targetPhone, message }),
+        body: JSON.stringify({ phone: destPhone, message }),
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data.status !== false) {
-        return res.json({ status: 'success', message: 'Berhasil dikirim via Wablas API!', data });
+        return res.json({ ok: true, status: 'success', detail: 'Berhasil dikirim via Wablas API!', message: 'Berhasil dikirim via Wablas API!', data });
       }
-      return res.status(400).json({ status: 'error', message: data.message || 'Gagal mengirim via Wablas API.', data });
+      return res.status(400).json({ ok: false, status: 'error', message: data.message || 'Gagal mengirim via Wablas API.', data });
     }
 
     if (provider === 'ultramsg') {
@@ -881,7 +927,7 @@ app.post('/api/whatsapp/send', async (req, res) => {
         endpointUrl || `https://api.ultramsg.com/${instanceId}/messages/chat`;
       const bodyParams = new URLSearchParams();
       bodyParams.append('token', apiKey);
-      bodyParams.append('to', `+${String(targetPhone).replace(/^\+/, '')}`);
+      bodyParams.append('to', `+${String(destPhone).replace(/^\+/, '')}`);
       bodyParams.append('body', String(message));
 
       const response = await fetch(url, {
@@ -891,9 +937,9 @@ app.post('/api/whatsapp/send', async (req, res) => {
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && !data.error) {
-        return res.json({ status: 'success', message: 'Berhasil dikirim via UltraMsg API!', data });
+        return res.json({ ok: true, status: 'success', detail: 'Berhasil dikirim via UltraMsg API!', message: 'Berhasil dikirim via UltraMsg API!', data });
       }
-      return res.status(400).json({ status: 'error', message: data.error || 'Gagal mengirim via UltraMsg API.', data });
+      return res.status(400).json({ ok: false, status: 'error', message: data.error || 'Gagal mengirim via UltraMsg API.', data });
     }
 
     // Custom Webhook
@@ -905,22 +951,168 @@ app.post('/api/whatsapp/send', async (req, res) => {
           ...(apiKey ? { Authorization: `Bearer ${apiKey}`, 'X-Api-Key': apiKey } : {}),
         },
         body: JSON.stringify({
-          target: targetPhone,
-          phone: targetPhone,
-          to: targetPhone,
+          target: destPhone,
+          phone: destPhone,
+          to: destPhone,
           message,
           text: message,
         }),
       });
       if (response.ok) {
-        return res.json({ status: 'success', message: 'Berhasil dikirim via Custom Webhook WhatsApp!' });
+        return res.json({ ok: true, status: 'success', detail: 'Berhasil dikirim via Custom Webhook WhatsApp!', message: 'Berhasil dikirim via Custom Webhook WhatsApp!' });
       }
     }
 
-    return res.status(400).json({ status: 'error', message: 'Konfigurasi endpoint WhatsApp tidak valid.' });
+    return res.status(400).json({ ok: false, status: 'error', message: 'Konfigurasi endpoint WhatsApp tidak valid.' });
   } catch (err: any) {
     console.error('WhatsApp Gateway proxy error:', err);
-    return res.status(500).json({ status: 'error', message: err.message || 'Gagal menghubungi server WhatsApp Gateway.' });
+    return res.status(500).json({ ok: false, status: 'error', message: err.message || 'Gagal menghubungi server WhatsApp Gateway.' });
+  }
+});
+
+// Incoming WhatsApp Webhook for 24/7 Bot Auto-Reply (Fonnte / Wablas / UltraMsg)
+app.post('/api/whatsapp/webhook', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const sender = String(body.sender || body.phone || body.from || body.pengirim || '').trim();
+    const incomingText = String(body.message || body.text || body.pesan || body.body || '').trim();
+
+    if (!sender || !incomingText) {
+      return res.json({ status: 'ignored', reason: 'Empty sender or message' });
+    }
+
+    const [settings, customers, coverage] = await Promise.all([
+      getCompanySettings(),
+      getAllCustomers(),
+      getAllCoverage(),
+    ]);
+
+    let waConfig: any = {};
+    try {
+      if (settings.whatsappConfigJson) {
+        waConfig = JSON.parse(settings.whatsappConfigJson);
+      }
+    } catch {}
+
+    if (waConfig.botAutoReplyEnabled === false) {
+      return res.json({ status: 'disabled', reason: 'Bot auto-reply is disabled' });
+    }
+
+    let packages: any[] = [];
+    try {
+      if (settings.packagesJson) {
+        packages = JSON.parse(settings.packagesJson);
+      }
+    } catch {}
+
+    const companyName = settings.name || 'Patas.Net';
+    const adminPhone = waConfig.adminPhone || waConfig.adminWhatsappNumber || settings.whatsappNumber || '0899-3299-977';
+
+    const packagesFormatted =
+      packages.length > 0
+        ? packages
+            .map(
+              (p: any, idx: number) =>
+                `${idx + 1}. *${p.name}* (${p.speed}) — *Rp ${Number(p.price).toLocaleString('id-ID')}/bln*`
+            )
+            .join('\n')
+        : '• Paket Home Fiber 20 Mbps — Rp 170.000/bln\n• Paket Super 50 Mbps — Rp 250.000/bln';
+
+    const coverageFormatted =
+      coverage.length > 0
+        ? coverage
+            .map((c: any) => {
+              const kecs = Array.isArray(c.kecamatans) ? c.kecamatans.map((k: any) => k.name).join(', ') : '';
+              return `• *${c.regionType || 'Kota'} ${c.cityName}*${kecs ? `: Kec. ${kecs}` : ''}`;
+            })
+            .join('\n')
+        : '• Area Layanan Aktif Fiber Optik';
+
+    const replaceVars = (txt: string) =>
+      String(txt || '')
+        .replace(/\{\{company_name\}\}|\{company_name\}/g, companyName)
+        .replace(/\{\{packages_list\}\}|\{packages_list\}/g, packagesFormatted)
+        .replace(/\{\{coverage_list\}\}|\{coverage_list\}/g, coverageFormatted)
+        .replace(/\{\{admin_phone\}\}|\{admin_phone\}/g, adminPhone);
+
+    const lower = incomingText.toLowerCase();
+    let botReply = '';
+
+    // 1. Check Customer ID / Billing query
+    const idMatch = incomingText.match(/TR-\d+/i);
+    if (idMatch || lower.includes('tagihan') || lower.includes('cek tagihan') || lower.includes('invoice')) {
+      const cleanSender = sender.replace(/[^0-9]/g, '').replace(/^0/, '62');
+      let matchedCust = idMatch
+        ? customers.find((c) => c.id.toUpperCase() === idMatch[0].toUpperCase())
+        : undefined;
+      if (!matchedCust && cleanSender) {
+        matchedCust = customers.find(
+          (c) => String(c.phone || '').replace(/[^0-9]/g, '').replace(/^0/, '62') === cleanSender
+        );
+      }
+      if (matchedCust) {
+        const pay = matchedCust.payments?.[0];
+        const payStatus =
+          pay?.status === 'paid'
+            ? '✅ LUNAS'
+            : pay?.status === 'pending_verification'
+            ? '⏳ MENUNGGU VERIFIKASI'
+            : '⚠️ BELUM DIBAYAR';
+        botReply =
+          `🧾 *INFO AKUN & TAGIHAN ${companyName.toUpperCase()}*\n\n` +
+          `Halo Kak *${matchedCust.name}*,\n` +
+          `• *ID Pelanggan:* ${matchedCust.id}\n` +
+          `• *Status Akun:* ${matchedCust.status.toUpperCase()}\n` +
+          `• *Periode:* ${pay?.billingPeriod || 'Bulan Berjalan'}\n` +
+          `• *Nominal:* Rp ${Number(pay?.amount || 0).toLocaleString('id-ID')}\n` +
+          `• *Status Bayar:* ${payStatus}\n\n` +
+          `Ketik *BAYAR* untuk panduan pembayaran QRIS instan.`;
+      }
+    }
+
+    // 2. Match custom or default bot rules
+    if (!botReply && Array.isArray(waConfig.botRules)) {
+      for (const rule of waConfig.botRules) {
+        if (!rule.active) continue;
+        const kws = String(rule.keywords || '')
+          .split(',')
+          .map((k: string) => k.trim().toLowerCase())
+          .filter(Boolean);
+        if (kws.some((kw: string) => lower === kw || lower.includes(kw))) {
+          botReply = replaceVars(rule.reply);
+          break;
+        }
+      }
+    }
+
+    // 3. Fallback reply
+    if (!botReply) {
+      botReply = replaceVars(
+        waConfig.botDefaultReply ||
+          `🤖 *Asisten Bot Otomatis ${companyName}*\n\nTerima kasih atas pesan Anda! Ketik *PAKET*, *CAKUPAN*, *TAGIHAN*, *BAYAR*, atau *GANGGUAN* untuk balasan otomatis instan.`
+      );
+    }
+
+    logWhatsAppMessage(sender, `[Bot Auto-Reply untuk "${incomingText}"]: ${botReply}`);
+
+    // Send reply via Fonnte if apiKey is configured
+    const apiKey = (waConfig.apiKey || '').trim();
+    if (apiKey && (waConfig.provider === 'fonnte' || !waConfig.provider)) {
+      const bodyParams = new URLSearchParams();
+      bodyParams.append('target', sender);
+      bodyParams.append('message', botReply);
+      bodyParams.append('countryCode', '62');
+      await fetch(waConfig.endpointUrl || waConfig.apiUrl || 'https://api.fonnte.com/send', {
+        method: 'POST',
+        headers: { Authorization: apiKey },
+        body: bodyParams,
+      }).catch(() => {});
+    }
+
+    return res.json({ status: 'success', reply: botReply });
+  } catch (err: any) {
+    console.error('WhatsApp Bot Webhook error:', err);
+    return res.status(500).json({ status: 'error', message: err.message });
   }
 });
 

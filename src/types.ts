@@ -32,6 +32,9 @@ export interface CustomerUser {
   payments: PaymentRecord[];
   tickets?: SupportTicket[];
   createdAt: string;
+  password?: string;
+  customPassword?: string;
+  passwordHash?: string;
   passwordResetRequested?: boolean;
   resetRequestedAt?: string;
   resetToken?: string;
@@ -55,18 +58,34 @@ export interface AppConfig {
   paymentGatewayKey: string;
 }
 
+export interface WhatsAppBotRule {
+  id: string;
+  keywords: string; // comma-separated keywords, e.g. "harga, paket, biaya, pasang"
+  reply: string;
+  active: boolean;
+}
+
 export interface WhatsAppApiConfig {
   enabled: boolean;
   provider: 'fonnte' | 'wablas' | 'ultramsg' | 'custom';
   apiKey: string;
   apiUrl: string;
+  endpointUrl?: string;
   instanceId?: string;
   adminWhatsappNumber: string;
+  adminPhone?: string;
   sendToAdminOnNewCustomer: boolean;
+  sendToAdminOnRegister?: boolean;
   sendToCustomerOnNewCustomer: boolean;
+  sendToCustomerOnRegister?: boolean;
   autoOpenWaRedirectOnRegister: boolean;
   adminNewCustomerTemplate: string;
+  adminTemplate?: string;
   customerWelcomeTemplate: string;
+  customerTemplate?: string;
+  botAutoReplyEnabled?: boolean;
+  botDefaultReply?: string;
+  botRules?: WhatsAppBotRule[];
 }
 
 export interface CompanySettings {

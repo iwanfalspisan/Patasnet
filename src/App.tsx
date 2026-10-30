@@ -632,9 +632,9 @@ export default function App() {
       let loggedIn = false;
       let loginData: any = null;
 
-      // 1. Try local / instant Admin or cached Customer check first if server is unreachable or slow
+      // 1. Try instant local authentication first (for both Admin and newly registered / cached Customers)
       const immediateLocalAuth = authenticateLocally(loginEmail, loginPassword, loginIsAdmin);
-      if (loginIsAdmin && (immediateLocalAuth.ok || immediateLocalAuth.success)) {
+      if (immediateLocalAuth.ok || immediateLocalAuth.success) {
         loginData = { user: immediateLocalAuth.user };
         loggedIn = true;
       }
@@ -936,77 +936,170 @@ export default function App() {
         {currentPage === 'subscribe' && (
           <>
             {registrationSuccessUser ? (
-              <div className="max-w-md mx-auto my-16 p-8 bg-white border border-slate-200/80 rounded-3xl shadow-2xl text-center space-y-6 text-xs">
+              <div className="max-w-lg mx-auto my-12 p-6 sm:p-8 bg-white border border-slate-200/80 rounded-3xl shadow-2xl text-center space-y-5 text-xs">
                 <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
                   <CheckCircle className="w-9 h-9" />
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-1.5">
+                  <span className="inline-block px-3 py-0.5 bg-emerald-100 text-emerald-800 rounded-full font-extrabold text-[10px] uppercase tracking-wider">
+                    Registrasi & Notifikasi WA Otomatis Aktif
+                  </span>
                   <h2 className="text-xl font-extrabold text-slate-900">Pendaftaran Berhasil!</h2>
                   <p className="text-slate-500 leading-relaxed">
-                    Akun Anda telah sukses dibuat dengan ID Pelanggan <strong className="text-slate-900 font-mono">{registrationSuccessUser.id}</strong>.
+                    Selamat datang <strong className="text-slate-800">{registrationSuccessUser.name}</strong>! Akun Anda telah dibuat dengan ID Pelanggan{' '}
+                    <strong className="text-blue-600 font-mono bg-blue-50 px-2 py-0.5 rounded">{registrationSuccessUser.id}</strong>.
                   </p>
                 </div>
 
-                {/* WhatsApp API Notification Status */}
-                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-left space-y-2">
-                  <div className="flex items-center gap-2 text-emerald-800 font-extrabold text-[11px]">
-                    <MessageSquare className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>
-                      {(registrationSuccessUser as any)?._waNotification?.adminSent
-                        ? 'Notifikasi WhatsApp Otomatis Terkirim ke Admin!'
-                        : 'Terhubung ke Layanan WhatsApp Admin'}
+                {/* WhatsApp Automatic Customer Notification & Bot Card */}
+                {(() => {
+                  const waData =
+                    (registrationSuccessUser as any)?._waNotification ||
+                    generateNewCustomerWhatsAppUrl(
+                      registrationSuccessUser,
+                      getLocalPackages().find((p) => p.id === registrationSuccessUser.packageId),
+                      companySettings
+                    );
+                  const customerSent = Boolean(waData?.apiSentToCustomer || waData?.customerSent);
+                  const adminSent = Boolean(waData?.apiSentToAdmin || waData?.adminSent);
+
+                  return (
+                    <div className="p-4 bg-emerald-50/90 border border-emerald-200 rounded-2xl text-left space-y-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 text-emerald-900 font-extrabold text-xs">
+                          <MessageSquare className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <span>
+                            {customerSent
+                              ? `Pesan WhatsApp Otomatis Terkirim ke ${registrationSuccessUser.phone}!`
+                              : `Notifikasi WhatsApp Otomatis ke ${registrationSuccessUser.phone}`}
+                          </span>
+                        </div>
+                        <span className="px-2 py-0.5 bg-emerald-600 text-white rounded-md text-[9px] font-extrabold uppercase shrink-0">
+                          {customerSent || adminSent ? 'Terkirim via API' : 'Siap Dikirim'}
+                        </span>
+                      </div>
+
+                      <p className="text-[11px] text-emerald-800 leading-relaxed">
+                        {customerSent
+                          ? `Bukti pendaftaran resmi & ID Pelanggan (${registrationSuccessUser.id}) telah dikirim otomatis ke WhatsApp Anda (${registrationSuccessUser.phone}) serta ke Admin Teknis.`
+                          : `Bukti pendaftaran resmi & menu Bot Asisten 24 Jam telah disiapkan otomatis untuk nomor WhatsApp Anda (${registrationSuccessUser.phone}).`}
+                      </p>
+
+                      {/* Preview of the automatic WhatsApp message sent to customer */}
+                      {waData?.customerMessage && (
+                        <div className="p-3 bg-white rounded-xl border border-emerald-200/80 space-y-1.5 shadow-2xs">
+                          <div className="flex items-center justify-between text-[10px] font-bold text-emerald-700 border-b border-slate-100 pb-1">
+                            <span>📩 Isi Pesan Otomatis ke WhatsApp Pelanggan:</span>
+                            <span className="font-mono">{registrationSuccessUser.phone}</span>
+                          </div>
+                          <pre className="text-[10px] text-slate-700 font-sans whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">
+                            {waData.customerMessage}
+                          </pre>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                        {waData?.customerWaUrl && (
+                          <a
+                            href={waData.customerWaUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold shadow-sm transition flex items-center justify-center gap-1.5 text-[11px]"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                            <span>Buka Pesan di WA Saya</span>
+                            <ExternalLink className="w-3 h-3 shrink-0" />
+                          </a>
+                        )}
+                        <a
+                          href={waData?.adminWaUrl || waData?.waRedirectUrl || '#'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-extrabold shadow-sm transition flex items-center justify-center gap-1.5 text-[11px]"
+                        >
+                          <MessageSquare className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                          <span>Konfirmasi & Tanya Bot WA</span>
+                          <ExternalLink className="w-3 h-3 shrink-0" />
+                        </a>
+                      </div>
+
+                      <div className="p-2.5 bg-emerald-100/70 rounded-xl text-[10px] text-emerald-900 leading-relaxed">
+                        🤖 <strong>Bot Auto-Reply 24 Jam Aktif:</strong> Jika ada pertanyaan di WhatsApp, Anda cukup membalas dengan kata kunci <strong>PAKET</strong>, <strong>TAGIHAN</strong>, <strong>BAYAR</strong>, <strong>CAKUPAN</strong>, atau <strong>GANGGUAN</strong> dan Bot kami akan langsung membalasnya secara otomatis!
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Customer Account Credentials Summary Card */}
+                <div className="p-4 bg-blue-50/80 rounded-2xl border border-blue-200 text-left space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="font-extrabold text-blue-950 text-xs">🔐 Akun Login Pelanggan Anda Siap Digunakan:</p>
+                    <span className="px-2 py-0.5 bg-blue-600 text-white rounded-md font-extrabold text-[9px] uppercase">
+                      Aktif & Terdaftar
                     </span>
                   </div>
-                  <p className="text-[11px] text-emerald-700 leading-relaxed">
-                    Data pendaftaran & titik koordinat GPS pemasangan Anda telah siap diproses oleh tim teknisi kami. Klik tombol WhatsApp di bawah untuk konfirmasi instan ke Admin:
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] bg-white p-3 rounded-xl border border-blue-100">
+                    <div>
+                      <span className="text-slate-400 block text-[10px]">Email Login:</span>
+                      <strong className="text-slate-900 font-mono break-all">{registrationSuccessUser.email}</strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block text-[10px]">ID Pelanggan:</span>
+                      <strong className="text-blue-600 font-mono">{registrationSuccessUser.id}</strong>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block text-[10px]">No. WhatsApp:</span>
+                      <strong className="text-slate-900 font-mono">{registrationSuccessUser.phone}</strong>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-blue-800">
+                    Anda dapat login kapan saja menggunakan <strong>Email</strong>, <strong>No. WhatsApp</strong>, atau <strong>ID Pelanggan</strong> beserta kata sandi yang baru saja Anda buat.
                   </p>
-                  <a
-                    href={
-                      (registrationSuccessUser as any)?._waNotification?.waRedirectUrl ||
-                      generateNewCustomerWhatsAppUrl(
-                        registrationSuccessUser,
-                        getLocalPackages().find((p) => p.id === registrationSuccessUser.packageId),
-                        companySettings
-                      )
-                    }
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold shadow-md shadow-emerald-600/20 transition flex items-center justify-center gap-2 text-xs"
+                </div>
+
+                <div className="space-y-2.5">
+                  <button
+                    onClick={() => {
+                      const userToLogin = registrationSuccessUser;
+                      setCurrentUser(userToLogin);
+                      setRegistrationSuccessUser(null);
+                      setCurrentPage('customer-dashboard');
+                    }}
+                    className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-extrabold shadow-lg shadow-blue-600/20 transition-all active:scale-95 text-xs flex items-center justify-center gap-2 cursor-pointer"
                   >
-                    <MessageSquare className="w-4 h-4" />
-                    <span>Kirim Konfirmasi ke WhatsApp Admin</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                </div>
+                    <span>Masuk Langsung ke Akun Saya (Portal Pelanggan) &rarr;</span>
+                  </button>
 
-                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-left space-y-2 leading-relaxed">
-                  <p className="font-semibold text-slate-800">Langkah Selanjutnya:</p>
-                  <ol className="list-decimal list-inside text-slate-500 space-y-1 text-[11px]">
-                    <li>Masuk ke Portal Pelanggan Anda.</li>
-                    <li>Selesaikan pembayaran pertama melalui QRIS atau transfer bank.</li>
-                    <li>Teknisi kami akan segera menjadwalkan instalasi WiFi Anda.</li>
-                  </ol>
+                  <button
+                    onClick={() => {
+                      setLoginIsAdmin(false);
+                      setLoginEmail(registrationSuccessUser.email);
+                      setLoginPassword(
+                        (registrationSuccessUser as any).password ||
+                          (registrationSuccessUser as any).customPassword ||
+                          ''
+                      );
+                      setRegistrationSuccessUser(null);
+                      setCurrentPage('login-selection');
+                    }}
+                    className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold transition-all text-[11px] cursor-pointer"
+                  >
+                    Masuk Melalui Halaman Login (Email & Password Terisi Otomatis)
+                  </button>
                 </div>
-
-                <button
-                  onClick={() => {
-                    setLoginIsAdmin(false);
-                    setLoginEmail(registrationSuccessUser.email);
-                    setRegistrationSuccessUser(null);
-                    setCurrentPage('login-selection');
-                  }}
-                  className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold shadow-md shadow-blue-500/10 transition-all active:scale-95"
-                >
-                  Masuk
-                </button>
               </div>
             ) : (
               <SubscriptionForm
                 selectedPackageId={selectedPackageId}
                 onNavigate={setCurrentPage}
                 onSubmitSuccess={(user) => {
-                  addLocalCustomer(user);
-                  syncToGoogleSheets('subscribe', user).catch(() => {});
+                  const updatedCusts = addLocalCustomer(user);
+                  setAdminCustomers(updatedCusts);
+                  setLoginEmail(user.email || '');
+                  setLoginPassword(user.password || user.customPassword || '');
+                  if (!(user as any)._syncedByServer) {
+                    syncToGoogleSheets('subscribe', user).catch(() => {});
+                  }
                   setRegistrationSuccessUser(user);
                 }}
               />
@@ -1333,13 +1426,19 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block font-bold text-slate-700 mb-1" htmlFor="login-email">ALAMAT EMAIL *</label>
+                    <label className="block font-bold text-slate-700 mb-1" htmlFor="login-email">
+                      {loginIsAdmin ? 'EMAIL ADMIN *' : 'EMAIL / NO. WHATSAPP / ID PELANGGAN *'}
+                    </label>
                     <input
-                      type="email"
+                      type="text"
                       id="login-email"
                       value={loginEmail}
                       onChange={(e) => setLoginEmail(e.target.value)}
-                      placeholder={loginIsAdmin ? 'admin@patasnet.id' : 'budi@gmail.com'}
+                      placeholder={
+                        loginIsAdmin
+                          ? 'admin@patasnet.id'
+                          : 'Masukkan Email, No. WA, atau ID Pelanggan (TR-...)'
+                      }
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-blue-600 focus:outline-none bg-slate-50/50"
                       required
                     />

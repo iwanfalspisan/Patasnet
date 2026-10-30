@@ -40,7 +40,7 @@ import {
   Bell,
   BookOpen
 } from 'lucide-react';
-import { CustomerUser, PaymentRecord, SupportTicket, WifiPackage, CompanySettings, WhatsAppApiConfig } from '../types';
+import { CustomerUser, PaymentRecord, SupportTicket, WifiPackage, CompanySettings, WhatsAppApiConfig, WhatsAppBotRule } from '../types';
 import { generateCustomerPDFReport } from '../lib/pdfGenerator';
 import { PACKAGES } from './Home';
 import Logo from './Logo';
@@ -86,9 +86,14 @@ import {
   sendWhatsAppMessageViaApi,
   getLocalWhatsAppLogs,
   DEFAULT_WHATSAPP_CONFIG,
+  DEFAULT_BOT_RULES,
+  DEFAULT_BOT_FALLBACK_REPLY,
   formatWhatsAppNumber,
+  generateWhatsAppBotReply,
+  processIncomingWhatsAppBotMessage,
 } from '../lib/whatsappApi';
 import { generateDefaultQrisSvg } from '../lib/qrisUtils';
+import { compressImageFile } from '../lib/imageCompressor';
 import {
   AreaChart,
   Area,
@@ -279,36 +284,147 @@ export default function AdminDashboard({
   const [kecToDelete, setKecToDelete] = useState<{ cityName: string; name: string } | null>(null);
   const [kelToDelete, setKelToDelete] = useState<{ cityName: string; kecamatanName: string; name: string } | null>(null);
 
-  // WhatsApp API Gateway states
+  // WhatsApp API Gateway & Auto-Reply Bot states
   const [waConfig, setWaConfig] = useState<WhatsAppApiConfig>(() => getWhatsAppConfig(companySettings));
   const [waTestPhone, setWaTestPhone] = useState(companySettings?.whatsappNumber || '081234567890');
   const [waTesting, setWaTesting] = useState(false);
   const [waSaving, setWaSaving] = useState(false);
   const [waTestResult, setWaTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  // Bot Auto-Reply rule editor & simulator states
+  const [newBotKeywords, setNewBotKeywords] = useState('');
+  const [newBotReply, setNewBotReply] = useState('');
+  const [editingBotRuleId, setEditingBotRuleId] = useState<string | null>(null);
+  const [botSimQuestion, setBotSimQuestion] = useState('PAKET');
+  const [botSimPhone, setBotSimPhone] = useState('');
+  const [botSimSendWa, setBotSimSendWa] = useState(false);
+  const [botSimLoading, setBotSimLoading] = useState(false);
+  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
+  const [botSimHistory, setBotSimHistory] = useState<
+    Array<{ sender: 'user' | 'bot'; text: string; intent?: string; time: string }>
+  >(() => {
+    const initial = generateWhatsAppBotReply('MENU');
+    return [
+      { sender: 'user', text: 'MENU', time: 'Baru saja' },
+      { sender: 'bot', text: initial.reply, intent: initial.matchedIntent, time: 'Baru saja' },
+    ];
+  });
+
   useEffect(() => {
     setWaConfig(getWhatsAppConfig(companySettings));
   }, [companySettings?.whatsappConfigJson]);
+
+  const persistWhatsAppConfigEverywhere = async (nextConfig: WhatsAppApiConfig) => {
+    const saved = saveWhatsAppConfig(nextConfig);
+    setWaConfig(saved);
+    if (onUpdateCompanySettings) {
+      await onUpdateCompanySettings({
+        name: companyNameInput || companySettings?.name || 'Patas.Net',
+        whatsappNumber: saved.adminPhone || saved.adminWhatsappNumber || companyWhatsappNumberInput,
+        whatsappConfigJson: JSON.stringify(saved),
+      });
+    }
+    return saved;
+  };
 
   const handleSaveWhatsAppConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     setWaSaving(true);
     try {
-      const saved = saveWhatsAppConfig(waConfig);
-      setWaConfig(saved);
-      if (onUpdateCompanySettings) {
-        await onUpdateCompanySettings({
-          name: companyNameInput || companySettings?.name || 'Patas.Net',
-          whatsappNumber: saved.adminPhone || companyWhatsappNumberInput,
-          whatsappConfigJson: JSON.stringify(saved),
-        });
-      }
-      showToast('Pengaturan API WhatsApp berhasil disimpan & aktif di seluruh perangkat!');
+      await persistWhatsAppConfigEverywhere(waConfig);
+      showToast('Pengaturan API WhatsApp & Bot Auto-Reply berhasil disimpan ke sistem & Google Sheets!');
     } catch (err) {
       console.error(err);
       showToast('Gagal menyimpan pengaturan API WhatsApp.', 'error');
     } finally {
       setWaSaving(false);
+    }
+  };
+
+  const handleSaveBotRule = async () => {
+    if (!newBotKeywords.trim() || !newBotReply.trim()) {
+      showToast('Harap isi kata kunci pertanyaan dan teks jawaban Bot.', 'error');
+      return;
+    }
+    const existingRules = Array.isArray(waConfig.botRules) ? [...waConfig.botRules] : [...DEFAULT_BOT_RULES];
+    let updatedRules: WhatsAppBotRule[];
+
+    if (editingBotRuleId) {
+      updatedRules = existingRules.map((r) =>
+        r.id === editingBotRuleId
+          ? { ...r, keywords: newBotKeywords.trim(), reply: newBotReply.trim(), active: true }
+          : r
+      );
+    } else {
+      updatedRules = [
+        {
+          id: `rule-${Date.now()}`,
+          keywords: newBotKeywords.trim(),
+          reply: newBotReply.trim(),
+          active: true,
+        },
+        ...existingRules,
+      ];
+    }
+
+    const nextConfig: WhatsAppApiConfig = { ...waConfig, botRules: updatedRules };
+    await persistWhatsAppConfigEverywhere(nextConfig);
+    setNewBotKeywords('');
+    setNewBotReply('');
+    setEditingBotRuleId(null);
+    showToast(
+      editingBotRuleId
+        ? 'Kata kunci & jawaban Bot berhasil diperbarui!'
+        : 'Kata kunci baru berhasil ditambahkan ke Bot Auto-Reply!'
+    );
+  };
+
+  const handleDeleteBotRule = async (ruleId: string) => {
+    const existingRules = Array.isArray(waConfig.botRules) ? waConfig.botRules : DEFAULT_BOT_RULES;
+    const updatedRules = existingRules.filter((r) => r.id !== ruleId);
+    const nextConfig: WhatsAppApiConfig = { ...waConfig, botRules: updatedRules };
+    await persistWhatsAppConfigEverywhere(nextConfig);
+    showToast('Aturan kata kunci Bot berhasil dihapus.');
+  };
+
+  const handleToggleBotRuleActive = async (ruleId: string) => {
+    const existingRules = Array.isArray(waConfig.botRules) ? waConfig.botRules : DEFAULT_BOT_RULES;
+    const updatedRules = existingRules.map((r) =>
+      r.id === ruleId ? { ...r, active: !r.active } : r
+    );
+    const nextConfig: WhatsAppApiConfig = { ...waConfig, botRules: updatedRules };
+    await persistWhatsAppConfigEverywhere(nextConfig);
+  };
+
+  const handleSimulateBotQuestion = async (customQuestion?: string) => {
+    const q = (customQuestion ?? botSimQuestion).trim();
+    if (!q) return;
+    setBotSimLoading(true);
+    const nowTime = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+    try {
+      const targetPhone = (botSimPhone || waTestPhone || '').trim();
+      const res = await processIncomingWhatsAppBotMessage(targetPhone, q, {
+        sendViaApi: botSimSendWa && Boolean(targetPhone),
+        companySettings,
+      });
+
+      setBotSimHistory((prev) => [
+        ...prev,
+        { sender: 'user', text: q, time: nowTime },
+        { sender: 'bot', text: res.reply, intent: res.matchedIntent, time: nowTime },
+      ]);
+      setWaLogs(getLocalWhatsAppLogs());
+      if (!customQuestion) setBotSimQuestion('');
+
+      if (botSimSendWa && targetPhone) {
+        showToast(
+          res.apiSent
+            ? `Balasan Bot berhasil dikirim ke WhatsApp ${targetPhone}!`
+            : `Balasan Bot dibuat (${res.statusDetail})`
+        );
+      }
+    } finally {
+      setBotSimLoading(false);
     }
   };
 
@@ -323,9 +439,9 @@ export default function AdminDashboard({
     try {
       const testMsg =
         `✅ *TES KONEKSI API WHATSAPP - ${companyNameInput || 'PATAS NET'}*\n\n` +
-        `Selamat! Integrasi WhatsApp Gateway (${waConfig.provider.toUpperCase()}) Anda telah terhubung.\n` +
-        `Setiap ada pelanggan baru mendaftar di website, sistem akan otomatis mengirimkan detail pelanggan & link titik koordinat Google Maps ke nomor ini.`;
-      const res = await sendWhatsAppMessageViaApi(target, testMsg, waConfig);
+        `Selamat! Integrasi WhatsApp Gateway (${waConfig.provider.toUpperCase()}) & Bot Auto-Reply 24 Jam Anda telah terhubung.\n` +
+        `Setiap ada pelanggan baru mendaftar di website, sistem otomatis mengirim pesan ke WA Pelanggan & Admin, serta membalas pertanyaan pelanggan secara otomatis.`;
+      const res = await sendWhatsAppMessageViaApi(target, testMsg, waConfig, 'test');
       setWaTestResult({ success: res.success, message: res.message });
       setWaLogs(getLocalWhatsAppLogs());
       if (res.success) {
@@ -764,20 +880,24 @@ export default function AdminDashboard({
 
   const handleUploadQrisFile = async (file: File) => {
     setUploadingQris(true);
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      const base64 = reader.result as string;
+    try {
+      const base64 = await compressImageFile(file, {
+        maxWidth: 900,
+        maxHeight: 900,
+        quality: 0.78,
+        preserveTransparency: true,
+      });
       setQrisUrlInput(base64);
+      setUploadingQris(false);
 
-      // Upload directly to Google Drive via Apps Script so all devices load the Google Drive image URL
+      showToast('Gambar barcode QRIS berhasil dimuat & disinkronkan ke semua perangkat!');
+
+      // Background sync to Google Drive & settings
       syncToGoogleSheets('update_settings', {
         name: companyNameInput,
         qrisBase64: base64,
         qrisUrl: base64,
       }).catch(() => {});
-
-      showToast('Gambar barcode QRIS berhasil diunggah ke Google Drive dan disinkronkan ke semua perangkat!');
-      setUploadingQris(false);
 
       if (onUpdateCompanySettings) {
         onUpdateCompanySettings({
@@ -785,24 +905,30 @@ export default function AdminDashboard({
           qrisUrl: base64,
         });
       }
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      setUploadingQris(false);
+      showToast('Gagal memuat file QRIS.', 'error');
+    }
   };
 
   const handleUploadLogoFile = async (file: File) => {
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      const base64 = reader.result as string;
+    try {
+      const base64 = await compressImageFile(file, {
+        maxWidth: 512,
+        maxHeight: 512,
+        quality: 0.82,
+        preserveTransparency: true,
+      });
       setCompanyLogoUrlInput(base64);
 
-      // Upload directly to Google Drive via Apps Script so all devices load the Google Drive image URL
+      showToast('Logo berhasil diunggah & disinkronkan ke semua browser dan perangkat!');
+
+      // Background sync to Google Drive via Apps Script
       syncToGoogleSheets('update_settings', {
         name: companyNameInput,
         logoBase64: base64,
         logoUrl: base64,
       }).catch(() => {});
-
-      showToast('Logo berhasil diunggah ke Google Drive dan disinkronkan ke semua browser & perangkat!');
 
       if (onUpdateCompanySettings) {
         onUpdateCompanySettings({
@@ -810,8 +936,9 @@ export default function AdminDashboard({
           logoUrl: base64,
         });
       }
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      showToast('Gagal memuat file logo.', 'error');
+    }
   };
 
   const handleSendWhatsAppReminder = async (userId: string, paymentId: string, type: 'before_due' | 'overdue') => {
@@ -2655,14 +2782,15 @@ function doPost(e) {
                   <input
                     type="file"
                     accept="image/*"
-                    onChange={(e) => {
+                    onChange={async (e) => {
                       const file = e.target.files?.[0];
                       if (file) {
-                        const reader = new FileReader();
-                        reader.onloadend = () => {
-                          setNewPromoImage(reader.result as string);
-                        };
-                        reader.readAsDataURL(file);
+                        const compressed = await compressImageFile(file, {
+                          maxWidth: 1100,
+                          maxHeight: 1100,
+                          quality: 0.76,
+                        });
+                        setNewPromoImage(compressed);
                       }
                     }}
                     className="text-xs text-slate-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer"
@@ -3070,17 +3198,17 @@ function doPost(e) {
                       <input
                         type="file"
                         accept="image/*"
-                        onChange={(e) => {
+                        onChange={async (e) => {
                           const file = e.target.files?.[0];
                           if (!file) return;
-                          const reader = new FileReader();
-                          reader.onloadend = () => {
-                            const base64 = reader.result as string;
-                            setHeroSlidesList((prev) => [...prev, base64]);
-                            showToast('Foto slide berhasil dimuat! Klik Simpan Perubahan untuk menyimpan.');
-                          };
-                          reader.readAsDataURL(file);
                           e.target.value = '';
+                          const compressed = await compressImageFile(file, {
+                            maxWidth: 1280,
+                            maxHeight: 800,
+                            quality: 0.75,
+                          });
+                          setHeroSlidesList((prev) => [...prev, compressed]);
+                          showToast('Foto slide berhasil dimuat! Klik Simpan Perubahan untuk menyimpan.');
                         }}
                         className="text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer w-full"
                       />
@@ -4158,6 +4286,379 @@ function doPost(e) {
               </form>
             </div>
 
+            {/* ========================================================================= */}
+            {/* SECTION 3: BOT AUTO-REPLY WHATSAPP 24 JAM (PENJAWAB PERTANYAAN OTOMATIS)  */}
+            {/* ========================================================================= */}
+            <div className="bg-white rounded-3xl border border-slate-200/80 shadow-md p-6 sm:p-8 space-y-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-5 border-b border-slate-100">
+                <div className="space-y-1">
+                  <span className="text-[10px] bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-extrabold uppercase tracking-wider inline-flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 text-blue-600" /> Bot Auto-Reply WhatsApp 24 Jam
+                  </span>
+                  <h3 className="text-lg sm:text-xl font-black text-slate-900">
+                    3. Bot Penjawab Otomatis Saat Pelanggan Bertanya di WhatsApp
+                  </h3>
+                  <p className="text-xs text-slate-500 leading-relaxed max-w-2xl">
+                    Setiap kali pelanggan mengirim pertanyaan ke WhatsApp (misalnya menanyakan <strong>Paket</strong>, <strong>Harga</strong>, <strong>Cek Tagihan</strong>, <strong>Area Cakupan</strong>, atau <strong>Gangguan</strong>), Bot akan langsung membalasnya secara otomatis 24 jam menggunakan data terbaru dari website!
+                  </p>
+                </div>
+
+                <label className="flex items-center gap-2.5 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-2xl cursor-pointer shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={waConfig.botAutoReplyEnabled !== false}
+                    onChange={async (e) => {
+                      const next = { ...waConfig, botAutoReplyEnabled: e.target.checked };
+                      await persistWhatsAppConfigEverywhere(next);
+                      showToast(
+                        e.target.checked
+                          ? 'Bot Auto-Reply WhatsApp diaktifkan!'
+                          : 'Bot Auto-Reply WhatsApp dinonaktifkan.'
+                      );
+                    }}
+                    className="w-4 h-4 text-emerald-600 rounded"
+                  />
+                  <span className="text-xs font-extrabold text-emerald-900">
+                    {waConfig.botAutoReplyEnabled !== false ? 'Bot Auto-Reply Aktif' : 'Bot Auto-Reply Nonaktif'}
+                  </span>
+                </label>
+              </div>
+
+              {/* Webhook URL Box for Fonnte */}
+              <div className="p-4 sm:p-5 bg-gradient-to-r from-slate-900 to-indigo-950 text-white rounded-2xl space-y-3 border border-slate-800">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-400">
+                       🔗 URL Webhook Auto-Reply (Pasang di Dashboard Fonnte &rarr; Device &rarr; Edit &rarr; Webhook URL)
+                    </span>
+                    <p className="text-[11px] text-slate-300 mt-0.5">
+                      Salin URL Webhook di bawah ini dan tempelkan ke kolom <strong>Webhook URL</strong> di Fonnte agar setiap pesan masuk ke WA otomatis dibalas oleh Bot 24 Jam:
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const webhookUrl = googleSheetsUrl || EMBEDDED_APPS_SCRIPT_URL;
+                      navigator.clipboard.writeText(webhookUrl);
+                      setCopiedWebhookUrl(true);
+                      showToast('URL Webhook Bot berhasil disalin! Tempelkan di kolom Webhook pada menu Device Fonnte.', 'success');
+                      setTimeout(() => setCopiedWebhookUrl(false), 3000);
+                    }}
+                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black rounded-xl text-xs transition shrink-0 flex items-center gap-1.5"
+                  >
+                    {copiedWebhookUrl ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedWebhookUrl ? 'URL Tersalin!' : 'Salin URL Webhook Fonnte'}</span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px] font-mono">
+                  <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl truncate">
+                    <span className="text-emerald-400 font-sans font-bold block text-[10px]">
+                      Opsi 1 — Webhook Cloud 24 Jam (Google Apps Script):
+                    </span>
+                    {googleSheetsUrl || EMBEDDED_APPS_SCRIPT_URL}
+                  </div>
+                  <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl truncate">
+                    <span className="text-blue-400 font-sans font-bold block text-[10px]">
+                      Opsi 2 — Webhook Server Website Langsung:
+                    </span>
+                    {typeof window !== 'undefined' ? `${window.location.origin}/api/whatsapp/webhook` : '/api/whatsapp/webhook'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                {/* Left Column: Bot Keyword Rules Manager */}
+                <div className="lg:col-span-7 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-extrabold text-xs uppercase tracking-wider text-slate-800">
+                      Daftar Kata Kunci & Jawaban Otomatis Bot ({(waConfig.botRules || DEFAULT_BOT_RULES).length} Aturan)
+                    </h4>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const next = {
+                          ...waConfig,
+                          botRules: DEFAULT_BOT_RULES,
+                          botDefaultReply: DEFAULT_BOT_FALLBACK_REPLY,
+                        };
+                        await persistWhatsAppConfigEverywhere(next);
+                        showToast('Kata kunci & jawaban Bot dikembalikan ke pengaturan standar.');
+                      }}
+                      className="text-[11px] text-blue-600 hover:underline font-bold flex items-center gap-1"
+                    >
+                      <RotateCcw className="w-3 h-3" /> Reset Standar
+                    </button>
+                  </div>
+
+                  {/* Add / Edit Rule Form */}
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
+                    <p className="font-extrabold text-xs text-slate-800">
+                      {editingBotRuleId ? '✏️ Edit Kata Kunci & Jawaban Bot' : '➕ Tambah Kata Kunci Pertanyaan Baru'}
+                    </p>
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-slate-600 uppercase">
+                        Kata Kunci Pertanyaan Pelanggan (Pisahkan dengan koma)
+                      </label>
+                      <input
+                        type="text"
+                        value={newBotKeywords}
+                        onChange={(e) => setNewBotKeywords(e.target.value)}
+                        placeholder="Contoh: jam buka, kantor, alamat kantor, cs"
+                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-semibold focus:ring-2 focus:ring-blue-600 focus:outline-none"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-slate-600 uppercase">
+                        Isi Balasan Otomatis Bot
+                      </label>
+                      <textarea
+                        rows={3}
+                        value={newBotReply}
+                        onChange={(e) => setNewBotReply(e.target.value)}
+                        placeholder="Contoh: Kantor operasional {{company_name}} buka setiap hari pukul 08.00 - 21.00 WIB..."
+                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-blue-600 focus:outline-none"
+                      />
+                      <p className="text-[10px] text-slate-400">
+                        Variabel dinamis: <code className="font-bold text-slate-600">{'{{company_name}}'}</code>,{' '}
+                        <code className="font-bold text-slate-600">{'{{packages_list}}'}</code>,{' '}
+                        <code className="font-bold text-slate-600">{'{{coverage_list}}'}</code>,{' '}
+                        <code className="font-bold text-slate-600">{'{{admin_phone}}'}</code>
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleSaveBotRule}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl text-xs transition flex items-center gap-1.5"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{editingBotRuleId ? 'Simpan Perubahan Kata Kunci' : 'Tambah ke Bot Auto-Reply'}</span>
+                      </button>
+                      {editingBotRuleId && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingBotRuleId(null);
+                            setNewBotKeywords('');
+                            setNewBotReply('');
+                          }}
+                          className="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl text-xs transition"
+                        >
+                          Batal
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* List of Rules */}
+                  <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+                    {(waConfig.botRules || DEFAULT_BOT_RULES).map((rule) => (
+                      <div
+                        key={rule.id}
+                        className={`p-3.5 rounded-2xl border transition space-y-1.5 ${
+                          rule.active
+                            ? 'bg-white border-slate-200 shadow-2xs'
+                            : 'bg-slate-50 border-slate-200/60 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex flex-wrap gap-1">
+                            {rule.keywords
+                              .split(',')
+                              .map((k) => k.trim())
+                              .filter(Boolean)
+                              .map((kw, i) => (
+                                <span
+                                  key={i}
+                                  className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-md font-extrabold text-[10px] uppercase"
+                                >
+                                  {kw}
+                                </span>
+                              ))}
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleBotRuleActive(rule.id)}
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                rule.active
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-slate-200 text-slate-600'
+                              }`}
+                            >
+                              {rule.active ? 'Aktif' : 'Nonaktif'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingBotRuleId(rule.id);
+                                setNewBotKeywords(rule.keywords);
+                                setNewBotReply(rule.reply);
+                              }}
+                              className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
+                              title="Edit Kata Kunci"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteBotRule(rule.id)}
+                              className="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                              title="Hapus Kata Kunci"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-600 whitespace-pre-line line-clamp-3 font-sans">
+                          {rule.reply}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Fallback Reply */}
+                  <div className="space-y-1.5 pt-2">
+                    <label className="block text-[10px] font-extrabold text-slate-700 uppercase">
+                      Pesan Balasan Default (Jika Pertanyaan Pelanggan Tidak Ada di Kata Kunci)
+                    </label>
+                    <textarea
+                      rows={4}
+                      value={waConfig.botDefaultReply || DEFAULT_BOT_FALLBACK_REPLY}
+                      onChange={(e) => setWaConfig((prev) => ({ ...prev, botDefaultReply: e.target.value }))}
+                      className="w-full px-3.5 py-2.5 border border-slate-200 rounded-2xl text-xs bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+                </div>
+
+                {/* Right Column: Live WhatsApp Bot Simulator & Tester */}
+                <div className="lg:col-span-5 flex flex-col justify-between bg-slate-900 text-white rounded-3xl p-5 border border-slate-800 space-y-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-2xl bg-emerald-500 text-slate-950 flex items-center justify-center font-black text-sm">
+                          🤖
+                        </div>
+                        <div>
+                          <h4 className="font-extrabold text-xs text-white">
+                            Simulator Chat Bot WhatsApp
+                          </h4>
+                          <p className="text-[10px] text-emerald-400 font-semibold">
+                            Online 24 Jam &bull; Terhubung Database Live
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setBotSimHistory([])}
+                        className="text-[10px] text-slate-400 hover:text-white underline"
+                      >
+                        Bersihkan Chat
+                      </button>
+                    </div>
+
+                    {/* Quick Test Chips */}
+                    <div className="space-y-1">
+                      <span className="text-[10px] text-slate-400 font-bold block">
+                        Klik contoh pertanyaan pelanggan untuk melihat balasan otomatis Bot:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {['MENU', 'PAKET', 'CAKUPAN', 'TR-1001', 'BAYAR', 'PASANG', 'GANGGUAN'].map((cmd) => (
+                          <button
+                            key={cmd}
+                            type="button"
+                            onClick={() => handleSimulateBotQuestion(cmd)}
+                            className="px-2.5 py-1 bg-slate-800 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-slate-700 rounded-xl text-[10px] font-extrabold transition"
+                          >
+                            {cmd}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Chat History Bubbles */}
+                    <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-3.5 h-80 overflow-y-auto space-y-3 text-xs">
+                      {botSimHistory.length === 0 ? (
+                        <div className="h-full flex items-center justify-center text-center text-slate-500 text-[11px]">
+                          Ketik pertanyaan di bawah atau klik tombol kata kunci di atas untuk menguji balasan Bot WhatsApp.
+                        </div>
+                      ) : (
+                        botSimHistory.map((item, idx) => (
+                          <div
+                            key={idx}
+                            className={`flex flex-col ${
+                              item.sender === 'user' ? 'items-end' : 'items-start'
+                            }`}
+                          >
+                            <div
+                              className={`max-w-[90%] rounded-2xl px-3.5 py-2.5 text-[11px] leading-relaxed whitespace-pre-wrap ${
+                                item.sender === 'user'
+                                  ? 'bg-emerald-600 text-white rounded-br-xs font-semibold'
+                                  : 'bg-slate-800 text-slate-100 border border-slate-700 rounded-bl-xs'
+                              }`}
+                            >
+                              {item.text}
+                            </div>
+                            <span className="text-[9px] text-slate-500 mt-1 px-1">
+                              {item.sender === 'user' ? 'Pelanggan' : `Bot Otomatis (${item.intent || 'Auto'})`} &bull; {item.time}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Simulator Input & Optional Real WA Send */}
+                  <div className="space-y-2.5 pt-2 border-t border-slate-800">
+                    <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={botSimSendWa}
+                        onChange={(e) => setBotSimSendWa(e.target.checked)}
+                        className="w-3.5 h-3.5 text-emerald-500 rounded"
+                      />
+                      <span>Kirim juga balasan Bot ini ke nomor WhatsApp asli</span>
+                    </label>
+
+                    {botSimSendWa && (
+                      <input
+                        type="text"
+                        value={botSimPhone}
+                        onChange={(e) => setBotSimPhone(e.target.value)}
+                        placeholder="Masukkan Nomor WA Tujuan (0812...)"
+                        className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder:text-slate-500"
+                      />
+                    )}
+
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={botSimQuestion}
+                        onChange={(e) => setBotSimQuestion(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleSimulateBotQuestion();
+                          }
+                        }}
+                        placeholder="Tulis pertanyaan pelanggan (misal: Berapa harga wifi?)..."
+                        className="flex-1 px-3.5 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                      <button
+                        type="button"
+                        disabled={botSimLoading}
+                        onClick={() => handleSimulateBotQuestion()}
+                        className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black rounded-xl text-xs transition shrink-0 flex items-center gap-1.5"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Tanya Bot</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* STEP-BY-STEP INSTALLATION GUIDE */}
             <div className="bg-slate-900 text-white rounded-3xl p-6 sm:p-8 space-y-6 shadow-xl">
               <div className="flex items-center gap-3 pb-4 border-b border-slate-800">
@@ -4166,10 +4667,10 @@ function doPost(e) {
                 </div>
                 <div>
                   <h3 className="text-base sm:text-lg font-black">
-                    Petunjuk Pemasangan API WhatsApp Otomatis (Step-by-Step)
+                    Petunjuk Pemasangan API WhatsApp & Bot Auto-Reply (Step-by-Step)
                   </h3>
                   <p className="text-xs text-slate-400">
-                    Ikuti 4 langkah mudah berikut untuk menghubungkan nomor WhatsApp Admin Anda ke website ini:
+                    Ikuti 4 langkah mudah berikut agar pesan pendaftaran & balasan Bot berjalan otomatis:
                   </p>
                 </div>
               </div>
@@ -4181,9 +4682,9 @@ function doPost(e) {
                   </span>
                   <p className="font-bold text-white">Buat Akun & Hubungkan Nomor WhatsApp</p>
                   <p className="text-slate-300 leading-relaxed text-[11px]">
-                    1. Buka website <strong>https://fonnte.com</strong> (atau Wablas / UltraMsg) lalu daftar akun.<br />
+                    1. Buka website <strong>https://fonnte.com</strong> lalu daftar akun (tersedia kuota gratis).<br />
                     2. Masuk ke menu <strong>Devices (Perangkat)</strong> &rarr; klik <strong>Add Device</strong>.<br />
-                    3. Masukkan nomor WhatsApp Admin/CS Anda lalu klik <strong>Connect</strong> dan scan QR Code menggunakan aplikasi WhatsApp di HP Anda (seperti login WhatsApp Web).
+                    3. Masukkan nomor WhatsApp Admin/CS Anda lalu klik <strong>Connect</strong> dan scan QR Code menggunakan aplikasi WhatsApp di HP Anda.
                   </p>
                 </div>
 
@@ -4195,30 +4696,29 @@ function doPost(e) {
                   <p className="text-slate-300 leading-relaxed text-[11px]">
                     1. Setelah status perangkat di Fonnte berstatus <strong>Connected (Terhubung)</strong>, klik tombol <strong>Token</strong> pada perangkat tersebut.<br />
                     2. Salin (Copy) kode <strong>API Token</strong> Anda.<br />
-                    3. Tempelkan (Paste) kode tersebut pada kolom <strong>"API Key / Token WhatsApp Gateway"</strong> di atas.
+                    3. Tempelkan (Paste) kode tersebut pada kolom <strong>"API Key / Token WhatsApp Gateway"</strong> di atas lalu klik <strong>Simpan Pengaturan API WhatsApp</strong>.
                   </p>
                 </div>
 
                 <div className="p-4 bg-slate-800/70 rounded-2xl border border-slate-700/70 space-y-2">
                   <span className="inline-block px-2.5 py-0.5 bg-amber-500/20 text-amber-300 rounded-md font-extrabold text-[10px]">
-                    LANGKAH 3 — AKTIFKAN & TES KIRIM
+                    LANGKAH 3 — AKTIFKAN BOT AUTO-REPLY DI FONNTE
                   </span>
-                  <p className="font-bold text-white">Simpan & Uji Coba Pengiriman</p>
+                  <p className="font-bold text-white">Pasang URL Webhook untuk Balasan Bot 24 Jam</p>
                   <p className="text-slate-300 leading-relaxed text-[11px]">
-                    1. Isi <strong>Nomor WhatsApp Admin Penerima</strong> (contoh: <code className="text-emerald-300">081234567890</code>).<br />
-                    2. Centang <strong>"Aktifkan Pengiriman Otomatis via API Gateway"</strong>.<br />
-                    3. Klik <strong>Simpan Pengaturan API WhatsApp</strong> (otomatis tersimpan ke Google Sheets sehingga aktif di semua perangkat & Vercel).<br />
-                    4. Klik tombol <strong>"Tes Kirim WA"</strong> untuk memastikan pesan masuk ke HP Anda.
+                    1. Klik tombol <strong>"Salin URL Webhook Fonnte"</strong> pada bagian No. 3 di atas.<br />
+                    2. Di dashboard Fonnte menu <strong>Device</strong>, klik tombol <strong>Edit</strong> pada perangkat Anda.<br />
+                    3. Tempelkan URL tersebut ke kolom <strong>Webhook URL</strong> dan aktifkan <strong>Autoread</strong>. Sekarang setiap pelanggan yang chat ke nomor WA Anda akan langsung dijawab otomatis oleh Bot!
                   </p>
                 </div>
 
                 <div className="p-4 bg-slate-800/70 rounded-2xl border border-slate-700/70 space-y-2">
                   <span className="inline-block px-2.5 py-0.5 bg-purple-500/20 text-purple-300 rounded-md font-extrabold text-[10px]">
-                    LANGKAH 4 — MODE TANPA TOKEN (GRATIS 100%)
+                    LANGKAH 4 — BOT CHAT DI WEBSITE & MODE GRATIS
                   </span>
-                  <p className="font-bold text-white">Tetap Jalan Meski Tanpa Token Berbayar</p>
+                  <p className="font-bold text-white">Bot CS Interaktif Juga Aktif di Website</p>
                   <p className="text-slate-300 leading-relaxed text-[11px]">
-                    Jika Anda belum memiliki Token API Gateway, website ini sudah dilengkapi fitur <strong>Direct WhatsApp Click-to-Chat</strong>. Saat pelanggan selesai mendaftar, tersedia tombol <strong>"Kirim Konfirmasi ke WhatsApp Admin"</strong> yang otomatis mengisi pesan lengkap beserta link titik koordinat Google Maps!
+                    Selain membalas di WhatsApp, pengunjung website juga dapat langsung bertanya pada <strong>Bot CS Otomatis</strong> melalui tombol hijau WhatsApp di pojok kanan bawah website kapan saja tanpa biaya kuota!
                   </p>
                 </div>
               </div>
